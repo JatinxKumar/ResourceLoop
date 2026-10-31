@@ -176,10 +176,10 @@ BEGIN
           AND t.relname = 'condition_reports'
           AND c.contype = 'u'
           AND (
-              SELECT array_agg(a.attname ORDER BY a.attnum)
+              SELECT array_agg(a.attname::text ORDER BY a.attnum)
               FROM unnest(c.conkey) k
               JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k
-          ) = ARRAY['booking_id', 'report_type']
+          ) = ARRAY['booking_id', 'report_type']::text[]
     ) THEN
         IF NOT EXISTS (
             SELECT 1 FROM pg_constraint WHERE conname = 'unique_booking_report_stage'
@@ -956,8 +956,8 @@ BEGIN
       AND token_type = p_token_type
       AND used_at IS NULL;
 
-    v_raw_token := extensions.encode(extensions.gen_random_bytes(32), 'hex');
-    v_token_hash := extensions.encode(extensions.digest(v_raw_token, 'sha256'), 'hex');
+    v_raw_token := encode(extensions.gen_random_bytes(32), 'hex');
+    v_token_hash := encode(extensions.digest(v_raw_token, 'sha256'), 'hex');
 
     INSERT INTO public.booking_access_tokens (
         booking_id,
@@ -1036,7 +1036,7 @@ BEGIN
         USING ERRCODE = '22023';
     END IF;
 
-    v_token_hash := extensions.encode(extensions.digest(trim(p_raw_token), 'sha256'), 'hex');
+    v_token_hash := encode(extensions.digest(trim(p_raw_token), 'sha256'), 'hex');
 
     SELECT * INTO v_token_record
     FROM public.booking_access_tokens
@@ -1203,7 +1203,7 @@ BEGIN
         USING ERRCODE = '22023';
     END IF;
 
-    v_token_hash := extensions.encode(extensions.digest(trim(p_raw_token), 'sha256'), 'hex');
+    v_token_hash := encode(extensions.digest(trim(p_raw_token), 'sha256'), 'hex');
 
     SELECT * INTO v_token_record
     FROM public.booking_access_tokens

@@ -48,39 +48,41 @@ BEGIN
             't.almansoor@resourceloop.institution.test', crypt('DemoPass123!', gen_salt('bf')), now(),
             '{"provider":"email","providers":["email"]}', '{"full_name":"Tariq Al-Mansoor"}', now(), now()
         )
+        ON CONFLICT (id) DO NOTHING;
+
         -- Also seed auth.identities so password sign-in works seamlessly for demo accounts
         IF EXISTS (
             SELECT 1 FROM information_schema.tables WHERE table_schema = 'auth' AND table_name = 'identities'
         ) THEN
             INSERT INTO auth.identities (
-                id, user_id, identity_data, provider, last_sign_in_at, created_at, updated_at
+                id, provider_id, user_id, identity_data, provider, last_sign_in_at, created_at, updated_at
             ) VALUES
             (
-                v_admin_id, v_admin_id,
+                v_admin_id, v_admin_id::text, v_admin_id,
                 jsonb_build_object('sub', v_admin_id::text, 'email', 'admin@resourceloop.institution.test', 'email_verified', true),
                 'email', now(), now(), now()
             ),
             (
-                v_owner1_id, v_owner1_id,
+                v_owner1_id, v_owner1_id::text, v_owner1_id,
                 jsonb_build_object('sub', v_owner1_id::text, 'email', 'h.vance@resourceloop.institution.test', 'email_verified', true),
                 'email', now(), now(), now()
             ),
             (
-                v_owner2_id, v_owner2_id,
+                v_owner2_id, v_owner2_id::text, v_owner2_id,
                 jsonb_build_object('sub', v_owner2_id::text, 'email', 'k.chen@resourceloop.institution.test', 'email_verified', true),
                 'email', now(), now(), now()
             ),
             (
-                v_seeker1_id, v_seeker1_id,
+                v_seeker1_id, v_seeker1_id::text, v_seeker1_id,
                 jsonb_build_object('sub', v_seeker1_id::text, 'email', 'm.lin@resourceloop.institution.test', 'email_verified', true),
                 'email', now(), now(), now()
             ),
             (
-                v_seeker2_id, v_seeker2_id,
+                v_seeker2_id, v_seeker2_id::text, v_seeker2_id,
                 jsonb_build_object('sub', v_seeker2_id::text, 'email', 't.almansoor@resourceloop.institution.test', 'email_verified', true),
                 'email', now(), now(), now()
             )
-            ON CONFLICT (provider, id) DO NOTHING;
+            ON CONFLICT (provider_id, provider) DO NOTHING;
         END IF;
     END IF;
 END $$;

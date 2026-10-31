@@ -75,13 +75,25 @@ BEGIN
     INSERT INTO public.organizations (id, name, organization_type, verification_status)
     VALUES (v_test_org_id, 'Harness Verification Labs', 'university', 'verified');
 
+    -- Provision auth users to satisfy foreign key public.profiles(id) -> auth.users(id)
+    INSERT INTO auth.users (id, aud, role, email)
+    VALUES 
+        (v_owner_id, 'authenticated', 'authenticated', 'custodian@harness.edu'),
+        (v_seeker1_id, 'authenticated', 'authenticated', 'alice@harness.edu'),
+        (v_seeker2_id, 'authenticated', 'authenticated', 'bob@harness.edu'),
+        (v_admin_id, 'authenticated', 'authenticated', 'admin@harness.edu')
+    ON CONFLICT (id) DO NOTHING;
+
     -- Provision user profiles
     INSERT INTO public.profiles (id, full_name, email, role, organization_id)
     VALUES 
         (v_owner_id, 'Dr. Custodian Lead', 'custodian@harness.edu', 'owner', v_test_org_id),
         (v_seeker1_id, 'Alice Researcher', 'alice@harness.edu', 'seeker', v_test_org_id),
         (v_seeker2_id, 'Bob Researcher', 'bob@harness.edu', 'seeker', v_test_org_id),
-        (v_admin_id, 'System Administrator', 'admin@harness.edu', 'admin', v_test_org_id);
+        (v_admin_id, 'System Administrator', 'admin@harness.edu', 'admin', v_test_org_id)
+    ON CONFLICT (id) DO UPDATE SET
+        role = EXCLUDED.role,
+        organization_id = EXCLUDED.organization_id;
 
     -- Provision standard reservable equipment
     INSERT INTO public.resources (
@@ -114,8 +126,8 @@ BEGIN
     PERFORM set_config('request.jwt.claim.sub', v_seeker1_id::text, true);
     SELECT * INTO v_booking1 FROM public.request_booking(
         v_resource_id,
-        now() + interval '5 days',
-        now() + interval '5 days 3 hours',
+        now() + interval '10 minutes',
+        now() + interval '3 hours 10 minutes',
         'Crystalline molecular diffraction analysis'
     );
 
@@ -135,8 +147,8 @@ BEGIN
     PERFORM set_config('request.jwt.claim.sub', v_seeker2_id::text, true);
     SELECT * INTO v_booking2 FROM public.request_booking(
         v_resource_id,
-        now() + interval '5 days 1 hour',
-        now() + interval '5 days 4 hours',
+        now() + interval '1 hour',
+        now() + interval '4 hours',
         'Conflicting overlapping reservation'
     );
 
@@ -192,7 +204,7 @@ BEGIN
     END IF;
 
     -- Verify token hash exists
-    v_token_hash := extensions.encode(extensions.digest(v_checkin_token, 'sha256'), 'hex');
+    v_token_hash := encode(extensions.digest(v_checkin_token, 'sha256'), 'hex');
     IF NOT EXISTS (
         SELECT 1 FROM public.booking_access_tokens WHERE token_hash = v_token_hash AND used_at IS NULL
     ) THEN
@@ -445,6 +457,11 @@ BEGIN
         v_resource_id, now() + interval '7 days 6 hours', now() + interval '7 days 10 hours', 'Chain C (16-20)'
     );
 
+    -- Ensure distinct sequential created_at timestamps within this single transaction block
+    UPDATE public.bookings SET created_at = now() - interval '3 minutes' WHERE id = v_chain_a.id;
+    UPDATE public.bookings SET created_at = now() - interval '2 minutes' WHERE id = v_chain_b.id;
+    UPDATE public.bookings SET created_at = now() - interval '1 minute' WHERE id = v_chain_c.id;
+
     -- Move all to waitlist via waitlist_booking RPC
     PERFORM set_config('request.jwt.claim.sub', v_owner_id::text, true);
     PERFORM public.waitlist_booking(v_chain_a.id);
@@ -467,7 +484,7 @@ BEGIN
     BEGIN
         PERFORM public.approve_booking(v_chain_c.id);
     EXCEPTION WHEN raise_exception THEN
-        IF SQLERRM LIKE '%FIFO queue fairness violation%' OR SQLSTATE = 'P0001' THEN
+        IF SQLERRM LIKE '%FIFO fairness violation%' OR SQLSTATE = 'P0001' THEN
             v_expected_conflict := true;
             RAISE NOTICE '  -> SUCCESS: FIFO fairness guard blocked Chain C from bypassing earlier Chain A in connected cluster.';
         END IF;
@@ -565,6 +582,7 @@ BEGIN
     DELETE FROM public.bookings WHERE resource_id IN (v_resource_id, v_donation_res_id);
     DELETE FROM public.resources WHERE id IN (v_resource_id, v_donation_res_id);
     DELETE FROM public.profiles WHERE id IN (v_owner_id, v_seeker1_id, v_seeker2_id, v_admin_id);
+    DELETE FROM auth.users WHERE id IN (v_owner_id, v_seeker1_id, v_seeker2_id, v_admin_id);
     DELETE FROM public.organizations WHERE id = v_test_org_id;
 
     RAISE NOTICE '=================================================================';
