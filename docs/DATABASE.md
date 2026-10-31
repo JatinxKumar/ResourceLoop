@@ -243,15 +243,15 @@ Row Level Security is enabled across all 8 tables.
 | `profiles` | Own profile, org peers, owners, admins | Own profile / trigger | Own profile (role immutable) | Admin only |
 | `resources` | Active resources (`status <> 'unavailable'`) or owner/admin | Owner/Admin with matching org | Owner or Admin | Owner or Admin |
 | `bookings` | Requester, Resource Owner, or Admin | Requester (`status = 'pending'`) | Requester (cancel only) OR Owner/Admin (transitions) | Admin only |
+| `booking_access_tokens` | Admin only | System / RPC | Admin only | Admin only |
 | `condition_reports` | Requester, Owner, Admin | Booking participants | **BLOCKED** (Immutable) | Admin only |
 | `incidents` | Reporter, Owner, Admin | Booking participants | Owner or Admin | Admin only |
 | `notifications` | Recipient only (`user_id = auth.uid()`) | System / Authenticated | Recipient only (`is_read`) | Recipient only |
 | `audit_logs` | Admin only | Authenticated / Triggers | **BLOCKED** (Immutable) | **BLOCKED** (Immutable) |
 
-### Privilege Escalation Prevention
-User role escalation is strictly mitigated at two levels:
-1. **RLS Policy**: Profiles can only be updated where `id = auth.uid()`, and the security definer function checks role changes.
-2. **PostgreSQL Trigger (`trg_profiles_role_guard`)**: A `BEFORE UPDATE OF role` trigger executes on `profiles`. If `NEW.role <> OLD.role` and the caller is not an admin (`NOT public.is_admin()`), the transaction aborts with an exception.
+### Privilege Escalation & State Machine Guarding
+1. **User Role Escalation**: Profiles role changes blocked unless caller is `is_admin()`.
+2. **Booking State Machine Guard (`trg_booking_state_machine_guard`)**: A `BEFORE INSERT OR UPDATE` trigger prevents direct manipulation of booking statuses. New bookings must enter in `pending`; transitions must route through authorized `SECURITY DEFINER` RPCs.
 
 ---
 
@@ -263,7 +263,9 @@ User role escalation is strictly mitigated at two levels:
    Automatically provisions a new record in `public.profiles` whenever an identity is registered in `auth.users`.
 3. **`trg_profiles_role_guard`**:
    Prevents non-administrators from escalating their role.
-4. **`trg_booking_lifecycle`**:
+4. **`trg_booking_state_machine_guard`**:
+   Guarantees direct client mutations cannot bypass the booking RPC state machine.
+5. **`trg_booking_lifecycle`**:
    - On `INSERT`: Notifies the resource owner of a pending reservation request and writes a `BOOKING_CREATED` audit log entry.
    - On `UPDATE`: When `status` changes, notifies the requester (e.g., `Booking Approved`) and writes a `BOOKING_STATUS_<STATUS>` audit log entry.
 

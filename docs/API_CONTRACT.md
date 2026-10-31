@@ -109,7 +109,7 @@ import {
 | **`rejectBooking`** | `bookingId: string, rejectionReason: string` | `Promise<Booking>` | Rejects booking with mandatory explanation; recalculates waitlist. |
 | **`waitlistBooking`**| `bookingId: string` | `Promise<Booking>` | Moves request to deterministic FIFO waitlist with unique queue position. |
 | **`cancelBooking`** | `bookingId: string` | `Promise<Booking>` | Cancels reservation prior to check-in (seeker or owner/admin); recalculates waitlist. |
-| **`generateBookingPass`** | `bookingId: string, tokenType: 'check_in' \| 'check_out'` | `Promise<BookingPassResponse>` | Generates opaque 256-bit single-use pass for screen display; stores only SHA-256 hash. |
+| **`generateBookingPass`** | `bookingId: string, tokenType: 'check_in' \| 'check_out'` | `Promise<BookingPassResponse>` | STRICT: Restricted to booking's seeker. Generates opaque 256-bit single-use pass for screen display; stores only SHA-256 hash. |
 | **`verifyCheckIn`** | `dto: VerifyHandshakeDTO` | `Promise<Booking>` | Custodian scans pass; atomically logs `before` condition report and marks asset `checked_in`. |
 | **`verifyCheckOut`**| `dto: VerifyHandshakeDTO` | `Promise<Booking>` | Custodian scans return pass; atomically logs `after` condition report and transitions to `returned`. Auto-flags incident if damaged. |
 | **`markOverdueBookings`** | *none* | `Promise<number>` | Maintenance sweep: transitions checked_in bookings past end_time to `overdue` while retaining active custody protection. |
@@ -267,6 +267,12 @@ stateDiagram-v2
 5. **`returned`**: Physical custody restored. Verified via return QR handshake + mandatory post-inspection report.
 6. **`overdue`**: Session time elapsed without check-out. Active custody protection remains active—no new session can start while equipment is unreturned.
 7. **`cancelled` / `rejected`**: Terminal closed states. Invalidate unused access tokens and recalculate waitlist queue.
+
+### Waitlist Queue Semantics & Window Overlaps:
+- Waitlists are strictly FIFO and evaluated per resource and overlapping time interval (`tstzrange(start_time, end_time, '[)') && tstzrange(cand_start, cand_end, '[)')`).
+- Non-identical intervals that intersect (e.g. 10:00 - 14:00 vs 12:00 - 16:00) compete for the shared time slice; the earlier submission is assigned position #1.
+- Queue mutations are serialized via PostgreSQL advisory transaction locks (`pg_advisory_xact_lock(hashtext('waitlist:' || resource_id))`).
+- When an approved booking is cancelled, `recalculate_waitlist(resource_id)` re-indexes the queue (`1..N`) ordered by `created_at ASC, id ASC`. The owner retains final decision authority and confirms candidate promotions.
 
 ---
 

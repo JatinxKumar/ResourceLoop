@@ -326,6 +326,7 @@ export async function cancelBooking(bookingId: string): Promise<Booking> {
 
 /**
  * Generates an opaque, high-entropy QR access pass.
+ * STRICT: Restricted to the booking's requester (seeker).
  * Returns the raw token ONCE to the seeker for display on screen.
  * Stored in database exclusively as SHA-256 hash.
  * Executes: public.generate_booking_pass(p_booking_id, p_token_type)
