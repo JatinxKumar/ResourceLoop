@@ -33,6 +33,7 @@ export const CheckInOutPage: React.FC = () => {
   const [scannedToken, setScannedToken] = useState('')
   const [manualToken, setManualToken] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [errorKind, setErrorKind] = useState<'expired' | 'replay' | 'unauthorized' | 'invalid' | 'general'>('general')
   const [resultBookingId, setResultBookingId] = useState<string | null>(null)
 
   // Condition report state (atomic with check-in/out)
@@ -160,18 +161,25 @@ export const CheckInOutPage: React.FC = () => {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Verification failed.'
 
-      // Classify error for clear UI messaging
+      // Classify error for specific contract states: expired, replay, unauthorized, invalid
       let displayError = msg
+      let kind: 'expired' | 'replay' | 'unauthorized' | 'invalid' | 'general' = 'general'
+
       if (msg.includes('expired') || msg.includes('Expired')) {
-        displayError = 'This custody token has expired. Ask the seeker to generate a fresh pass.'
+        kind = 'expired'
+        displayError = 'This custody pass token has expired. Ask the seeker to generate a fresh pass from their My Reservations page.'
       } else if (msg.includes('already') || msg.includes('replay') || msg.includes('used')) {
-        displayError = 'This token has already been used. Each custody verification is single-use.'
-      } else if (msg.includes('unauthorized') || msg.includes('Unauthorized') || msg.includes('permission')) {
-        displayError = 'You are not authorized to verify this booking. Only the resource owner or custodian may scan tokens.'
+        kind = 'replay'
+        displayError = 'This pass token has already been used. Each custody verification pass is strictly single-use to prevent replay.'
+      } else if (msg.includes('unauthorized') || msg.includes('Unauthorized') || msg.includes('permission') || msg.includes('forbidden')) {
+        kind = 'unauthorized'
+        displayError = 'You are not authorized to verify this booking. Only the resource owner or designated lab custodian may scan passes.'
       } else if (msg.includes('not found') || msg.includes('invalid') || msg.includes('Invalid')) {
-        displayError = 'Invalid or unrecognized token. Verify the token is correct and try again.'
+        kind = 'invalid'
+        displayError = 'Invalid or unrecognized pass token. Ensure the complete token was scanned or entered.'
       }
 
+      setErrorKind(kind)
       setError(displayError)
       setStep('error')
     } finally {
@@ -186,6 +194,7 @@ export const CheckInOutPage: React.FC = () => {
     setConditionStatus('')
     setConditionNotes('')
     setError(null)
+    setErrorKind('general')
     setResultBookingId(null)
     stopCamera()
   }
@@ -456,11 +465,40 @@ export const CheckInOutPage: React.FC = () => {
       {step === 'error' && (
         <div className="bg-white rounded-xl border border-rose-200 p-6 shadow-sm">
           <div className="flex items-start gap-3 mb-4">
-            <div className="w-10 h-10 rounded-full bg-rose-50 border border-rose-200 flex items-center justify-center flex-shrink-0">
-              <XCircle className="w-5 h-5 text-rose-600" />
+            <div className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${
+              errorKind === 'expired'
+                ? 'bg-amber-50 border border-amber-200'
+                : errorKind === 'unauthorized'
+                ? 'bg-purple-50 border border-purple-200'
+                : 'bg-rose-50 border border-rose-200'
+            }`}>
+              <XCircle className={`w-5 h-5 ${
+                errorKind === 'expired'
+                  ? 'text-amber-600'
+                  : errorKind === 'unauthorized'
+                  ? 'text-purple-600'
+                  : 'text-rose-600'
+              }`} />
             </div>
             <div>
-              <h3 className="text-sm font-bold text-navy-950 mb-1">Verification Failed</h3>
+              <div className="flex items-center gap-2 mb-1">
+                <h3 className="text-sm font-bold text-navy-950">
+                  {errorKind === 'expired' && 'Pass Token Expired'}
+                  {errorKind === 'replay' && 'Single-Use Replay Detected'}
+                  {errorKind === 'unauthorized' && 'Authorization Denied'}
+                  {errorKind === 'invalid' && 'Invalid Pass Token'}
+                  {errorKind === 'general' && 'Verification Failed'}
+                </h3>
+                <span className={`text-[10px] font-semibold px-2 py-0.5 rounded uppercase tracking-wider ${
+                  errorKind === 'expired'
+                    ? 'bg-amber-100 text-amber-800'
+                    : errorKind === 'unauthorized'
+                    ? 'bg-purple-100 text-purple-800'
+                    : 'bg-rose-100 text-rose-800'
+                }`}>
+                  {errorKind}
+                </span>
+              </div>
               <p className="text-xs text-rose-700 leading-relaxed">{error}</p>
             </div>
           </div>
@@ -470,13 +508,13 @@ export const CheckInOutPage: React.FC = () => {
               className="px-3 py-1.5 text-xs font-medium text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors flex items-center gap-1"
             >
               <RefreshCw className="w-3.5 h-3.5" />
-              Start Over
+              <span>Start Over</span>
             </button>
             <button
-              onClick={() => setStep('scan')}
+              onClick={() => { setError(null); setStep('scan') }}
               className="px-3 py-1.5 text-xs font-semibold text-brand-700 bg-brand-50 border border-brand-200 rounded-lg hover:bg-brand-100 transition-colors"
             >
-              Try Different Token
+              Try Different Pass Token
             </button>
           </div>
         </div>

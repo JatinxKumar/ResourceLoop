@@ -1,6 +1,21 @@
-import { useState, useEffect, useCallback } from 'react'
-import { supabase, isSupabaseConfigured } from '@/lib/supabase'
-import type { Booking, CreateBookingDTO, BookingStatus, ConditionStatus } from '@/types/domain'
+import { supabase } from '@/lib/supabase'
+import type { Booking, CreateBookingDTO, ConditionStatus } from '@/types/domain'
+
+export type PassTokenType = 'check_in' | 'check_out'
+
+export interface BookingPassResponse {
+  token: string
+  token_type: PassTokenType
+  expires_at?: string
+  booking_id?: string
+  [key: string]: unknown
+}
+
+export interface VerificationResult {
+  booking_id: string
+  status: string
+  [key: string]: unknown
+}
 
 /**
  * Fetch all bookings created by a specific seeker.
@@ -95,7 +110,7 @@ export async function requestBooking(dto: CreateBookingDTO): Promise<Booking> {
 // =============================================================================
 
 /**
- * Approve a pending booking via backend RPC.
+ * Approve a pending booking via backend RPC `approve_booking`.
  * The RPC enforces ownership, status-guard, and audit logging.
  */
 export async function approveBooking(bookingId: string): Promise<void> {
@@ -110,7 +125,7 @@ export async function approveBooking(bookingId: string): Promise<void> {
 }
 
 /**
- * Reject a pending booking via backend RPC.
+ * Reject a pending booking via backend RPC `reject_booking`.
  * The RPC enforces ownership, status-guard, and audit logging.
  */
 export async function rejectBooking(
@@ -129,14 +144,78 @@ export async function rejectBooking(
 }
 
 /**
- * Verify a check-in token and transition booking to checked_in.
+ * Generate a booking pass via backend RPC `generate_booking_pass`.
+ * Arguments:
+ * - p_booking_id: UUID
+ * - p_token_type: 'check_in' | 'check_out'
+ *
+ * Matches the backend response shape whether returned as JSON or string.
+ */
+export async function generateBookingPass(
+  bookingId: string,
+  tokenType: PassTokenType = 'check_in'
+): Promise<BookingPassResponse> {
+  const { data, error } = await supabase.rpc('generate_booking_pass', {
+    p_booking_id: bookingId,
+    p_token_type: tokenType,
+  })
+
+  if (error) {
+    console.error('generate_booking_pass RPC failed:', error.message)
+    throw new Error(error.message || 'Failed to generate booking pass.')
+  }
+
+  // Handle bare string if returned
+  if (typeof data === 'string') {
+    return {
+      token: data,
+      token_type: tokenType,
+    }
+  }
+
+  // Handle JSON object returned by backend RPC
+  if (data && typeof data === 'object') {
+    const raw = data as Record<string, unknown>
+    const token =
+      (typeof raw.token === 'string' && raw.token) ||
+      (typeof raw.pass_token === 'string' && raw.pass_token) ||
+      (typeof raw.pass === 'string' && raw.pass) ||
+      (typeof raw.qr_code === 'string' && raw.qr_code) ||
+      JSON.stringify(raw)
+
+    const expires_at =
+      typeof raw.expires_at === 'string'
+        ? raw.expires_at
+        : typeof raw.expiresAt === 'string'
+        ? raw.expiresAt
+        : undefined
+
+    const retTokenType =
+      raw.token_type === 'check_in' || raw.token_type === 'check_out'
+        ? (raw.token_type as PassTokenType)
+        : tokenType
+
+    return {
+      token,
+      token_type: retTokenType,
+      expires_at,
+      booking_id: typeof raw.booking_id === 'string' ? raw.booking_id : bookingId,
+      ...raw,
+    }
+  }
+
+  throw new Error('Invalid response received from generate_booking_pass.')
+}
+
+/**
+ * Verify a check-in token and transition booking to checked_in via `verify_check_in`.
  * Condition report data is passed atomically with the check-in.
  */
 export async function verifyCheckIn(
   token: string,
   conditionStatus?: ConditionStatus,
   conditionNotes?: string
-): Promise<{ booking_id: string; status: string }> {
+): Promise<VerificationResult> {
   const { data, error } = await supabase.rpc('verify_check_in', {
     p_token: token,
     p_condition_status: conditionStatus || null,
@@ -148,18 +227,30 @@ export async function verifyCheckIn(
     throw new Error(error.message || 'Check-in verification failed.')
   }
 
-  return data as { booking_id: string; status: string }
+  if (data && typeof data === 'object') {
+    const raw = data as Record<string, unknown>
+    return {
+      booking_id: (raw.booking_id as string) || (raw.id as string) || '',
+      status: (raw.status as string) || 'checked_in',
+      ...raw,
+    }
+  }
+
+  return {
+    booking_id: typeof data === 'string' ? data : '',
+    status: 'checked_in',
+  }
 }
 
 /**
- * Verify a check-out / return token and transition booking to returned.
+ * Verify a check-out / return token and transition booking to returned via `verify_check_out`.
  * Condition report data is passed atomically with the check-out.
  */
 export async function verifyCheckOut(
   token: string,
   conditionStatus?: ConditionStatus,
   conditionNotes?: string
-): Promise<{ booking_id: string; status: string }> {
+): Promise<VerificationResult> {
   const { data, error } = await supabase.rpc('verify_check_out', {
     p_token: token,
     p_condition_status: conditionStatus || null,
@@ -171,39 +262,32 @@ export async function verifyCheckOut(
     throw new Error(error.message || 'Check-out verification failed.')
   }
 
-  return data as { booking_id: string; status: string }
+  if (data && typeof data === 'object') {
+    const raw = data as Record<string, unknown>
+    return {
+      booking_id: (raw.booking_id as string) || (raw.id as string) || '',
+      status: (raw.status as string) || 'returned',
+      ...raw,
+    }
+  }
+
+  return {
+    booking_id: typeof data === 'string' ? data : '',
+    status: 'returned',
+  }
 }
 
 /**
- * Generate a custody pass token for an approved booking.
- * Returns an opaque token to be rendered as a QR code.
+ * Cancel a booking via backend RPC `cancel_booking`.
+ * Enforces requester ownership, state transition guard, and audit logging.
  */
-export async function generateCustodyToken(
-  bookingId: string
-): Promise<{ token: string; expires_at: string }> {
-  const { data, error } = await supabase.rpc('generate_custody_token', {
+export async function cancelBooking(bookingId: string): Promise<void> {
+  const { error } = await supabase.rpc('cancel_booking', {
     p_booking_id: bookingId,
   })
 
   if (error) {
-    console.error('generate_custody_token RPC failed:', error.message)
-    throw new Error(error.message || 'Failed to generate custody token.')
-  }
-
-  return data as { token: string; expires_at: string }
-}
-
-/**
- * Cancel a pending booking (Requester action).
- */
-export async function cancelBooking(bookingId: string): Promise<void> {
-  const { error } = await supabase
-    .from('bookings')
-    .update({ status: 'cancelled' })
-    .eq('id', bookingId)
-
-  if (error) {
-    console.error('Failed to cancel booking:', error.message)
-    throw error
+    console.error('cancel_booking RPC failed:', error.message)
+    throw new Error(error.message || 'Failed to cancel reservation.')
   }
 }
