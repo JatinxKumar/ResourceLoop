@@ -1,23 +1,197 @@
-# ResourceLoop Frontend Integration & API Contract
+# ResourceLoop Frontend Integration & Service Layer Contract
 
-This document provides frontend engineers with data contracts, query patterns, workflow state transitions, and Supabase client examples for ResourceLoop.
+This document provides frontend engineers with data contracts, exported backend services, query patterns, workflow state transitions, and Supabase client examples for ResourceLoop.
 
 ---
 
-## 1. Environment Configuration
+## 1. Service Layer Architecture
 
-The frontend application requires the following environment variables (defined in `.env.local`):
+The backend exposes a modular service layer under `src/services/` that interacts with Supabase while enforcing data validation, Row Level Security (RLS), and business logic.
 
-```bash
-VITE_SUPABASE_URL="https://<your-supabase-project-id>.supabase.co"
-VITE_SUPABASE_ANON_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+### 1.1 Resource Management Service (`src/services/resources.ts`)
+
+```typescript
+import {
+  listResources,
+  getResourceById,
+  createResource,
+  updateResource,
+  deleteResource,
+  getOwnerResources,
+  getAvailableResources,
+  uploadResourceImage,
+  checkResourceEligibility,
+  getResourceAvailability,
+} from '../services/resources';
 ```
 
-> **CRITICAL SECURITY RULE:** Never expose or bundle the Supabase `service_role` key in frontend code. All operations are performed using the `anon` key, authenticated via JWT, and protected by PostgreSQL Row Level Security (RLS).
+#### Function Specifications:
+
+| Function | Parameters | Return Type | Description |
+| :--- | :--- | :--- | :--- |
+| **`listResources`** | `filters?: ResourceFilters` | `Promise<Resource[]>` | Search and filter resources with joins to `organization` and `owner`. |
+| **`getResourceById`** | `id: string` | `Promise<Resource \| null>` | Retrieve resource details by UUID. |
+| **`createResource`** | `input: CreateResourceDTO` | `Promise<Resource>` | Register new institutional asset (restricted to authorized owners/admins). |
+| **`updateResource`** | `id: string, input: UpdateResourceDTO` | `Promise<Resource>` | Update resource specifications (restricted to asset owner/admin). |
+| **`deleteResource`** | `id: string` | `Promise<void>` | Delete resource (restricted to asset owner/admin). |
+| **`getOwnerResources`** | *none* | `Promise<Resource[]>` | Retrieve all resources managed by currently authenticated owner. |
+| **`getAvailableResources`**| *none* | `Promise<Resource[]>` | Quick helper returning all resources with `status = 'available'`. |
+| **`uploadResourceImage`**| `file: File, organizationId: string` | `Promise<string>` | Upload image to `resource-images` bucket and return public URL. |
+| **`checkResourceEligibility`**| `resourceId: string, userId?: string` | `Promise<ResourceEligibilityResult>` | Reusable check for operational status, training, and affiliation. |
+| **`getResourceAvailability`**| `resourceId: string` | `Promise<ResourceAvailabilityInfo>` | Retrieve operating days, hours, and booking slot duration. |
 
 ---
 
-## 2. Booking Lifecycle & State Machine
+### 1.2 Profile Service (`src/services/profiles.ts`)
+
+```typescript
+import {
+  getCurrentProfile,
+  getProfileById,
+  updateCurrentProfile,
+} from '../services/profiles';
+```
+
+#### Function Specifications:
+
+| Function | Parameters | Return Type | Description |
+| :--- | :--- | :--- | :--- |
+| **`getCurrentProfile`** | *none* | `Promise<Profile \| null>` | Get authenticated user's profile with linked organization. |
+| **`getProfileById`** | `userId: string` | `Promise<Profile \| null>` | Lookup profile by user ID. |
+| **`updateCurrentProfile`** | `input: UpdateProfileDTO` | `Promise<Profile>` | Update display name, avatar, or org. **Role escalation is blocked**. |
+
+---
+
+### 1.3 Organization Service (`src/services/organizations.ts`)
+
+```typescript
+import {
+  getOrganizations,
+  getOrganizationById,
+} from '../services/organizations';
+```
+
+#### Function Specifications:
+
+| Function | Parameters | Return Type | Description |
+| :--- | :--- | :--- | :--- |
+| **`getOrganizations`** | *none* | `Promise<Organization[]>` | Retrieve verified universities, research labs, and institutes. |
+| **`getOrganizationById`** | `id: string` | `Promise<Organization \| null>` | Lookup organization details by UUID. |
+
+---
+
+## 2. Usage Examples in React Components
+
+### 2.1 Fetching Resources with Filters (Catalogue / Discovery)
+
+```typescript
+import { useState, useEffect } from 'react';
+import { listResources } from '@/services/resources';
+import type { Resource, ResourceFilters } from '@/types/domain';
+
+export function useResourceCatalogue(filters: ResourceFilters) {
+  const [resources, setResources] = useState<Resource[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    setLoading(true);
+
+    listResources(filters)
+      .then((data) => {
+        if (isMounted) {
+          setResources(data);
+          setError(null);
+        }
+      })
+      .catch((err) => {
+        if (isMounted) setError(err.message);
+      })
+      .finally(() => {
+        if (isMounted) setLoading(false);
+      });
+
+    return () => { isMounted = false; };
+  }, [filters.query, filters.category, filters.resource_type, filters.available_only]);
+
+  return { resources, loading, error };
+}
+```
+
+### 2.2 Registering Equipment with Image Upload (Owner Flow)
+
+```typescript
+import { createResource, uploadResourceImage } from '@/services/resources';
+import type { CreateResourceDTO } from '@/types/domain';
+
+async function handleNewEquipmentSubmit(
+  formData: CreateResourceDTO,
+  imageFile: File | null
+) {
+  try {
+    let imageUrl = formData.image_url;
+
+    // 1. Upload image to Supabase Storage if selected
+    if (imageFile) {
+      imageUrl = await uploadResourceImage(imageFile, formData.organization_id);
+    }
+
+    // 2. Insert resource record
+    const created = await createResource({
+      ...formData,
+      image_url: imageUrl,
+    });
+
+    console.log('Resource created successfully:', created.id);
+    return created;
+  } catch (err: any) {
+    console.error('Failed to create resource:', err.message);
+    throw err;
+  }
+}
+```
+
+### 2.3 Checking Eligibility Before Booking
+
+```typescript
+import { checkResourceEligibility } from '@/services/resources';
+
+async function verifyBookingPrerequisites(resourceId: string) {
+  const result = await checkResourceEligibility(resourceId);
+
+  if (!result.eligible) {
+    alert(`Cannot reserve: ${result.reasons.join(', ')}`);
+    return false;
+  }
+
+  if (result.checks.trainingRequired) {
+    // Show safety clearance confirmation dialog
+    console.warn('Note: This resource requires verified training');
+  }
+
+  return true;
+}
+```
+
+---
+
+## 3. Storage Bucket: `resource-images`
+
+ResourceLoop uses Supabase Storage for equipment and laboratory imagery.
+
+- **Bucket Name:** `resource-images`
+- **Access Level:** Public read access (`public: true`).
+- **Upload Restrictions:**
+  - Authenticated users with `role IN ('owner', 'admin')`.
+  - Max file size: **5 MB**.
+  - Permitted MIME types: `image/jpeg`, `image/png`, `image/webp`, `image/gif`, `image/svg+xml`.
+- **Path Convention:** `<organization_id>/<timestamp>-<random_key>.<ext>`
+- **Deletions:** Restricted to the asset uploader or platform administrators.
+
+---
+
+## 4. Booking Lifecycle & State Machine
 
 ```mermaid
 stateDiagram-v2
@@ -39,221 +213,19 @@ stateDiagram-v2
     returned --> [*]
 ```
 
-### State Definitions & Rules:
-1. **`pending`**: Initial state upon submission. Requesters can cancel; owners can approve or reject with an optional `rejection_reason`.
-2. **`approved`**: Scheduled reservation confirmed. Requesters can submit a `before` condition report upon arrival.
-3. **`checked_in`**: Asset actively in use. Unlocks the `after` condition report button.
-4. **`returned`**: Asset inspected and safely returned. Terminal successful state.
-5. **`overdue`**: Current time exceeds `end_time` without check-out. Flagged for institutional administrators.
+### State Definitions:
+1. **`pending`**: Initial state upon submission.
+2. **`approved`**: Reservation confirmed by owner.
+3. **`checked_in`**: Asset actively in use.
+4. **`returned`**: Asset inspected and safely returned.
+5. **`overdue`**: Session time elapsed without check-out.
 6. **`cancelled` / `rejected`**: Terminal closed states.
 
 ---
 
-## 3. Frontend Data Contracts & Queries
+## 5. Security & Access Control Policies
 
-All domain TypeScript models are exported from [`src/types/domain.ts`](file:///Users/vinayak_sharma/Desktop/ResourceLoop/src/types/domain.ts).
-
-### 3.1 Browsing Available Resources (with Organization Details)
-
-```typescript
-import { supabase } from '@/lib/supabaseClient';
-import type { Resource } from '@/types/domain';
-
-export async function fetchAvailableResources(): Promise<Resource[]> {
-  const { data, error } = await supabase
-    .from('resources')
-    .select(`
-      *,
-      organization:organizations(*),
-      owner:profiles(id, full_name, email, avatar_url)
-    `)
-    .neq('status', 'unavailable')
-    .order('created_at', { ascending: false });
-
-  if (error) {
-    console.error('Error fetching resources:', error.message);
-    throw error;
-  }
-
-  return data as Resource[];
-}
-```
-
-### 3.2 Submitting a Booking Request
-
-```typescript
-import { supabase } from '@/lib/supabaseClient';
-import type { CreateBookingDTO, Booking } from '@/types/domain';
-
-export async function requestBooking(dto: CreateBookingDTO): Promise<Booking> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('User not authenticated');
-
-  const { data, error } = await supabase
-    .from('bookings')
-    .insert({
-      resource_id: dto.resource_id,
-      requester_id: user.id,
-      start_time: dto.start_time,
-      end_time: dto.end_time,
-      purpose: dto.purpose,
-      status: 'pending' // Enforced by RLS
-    })
-    .select(`
-      *,
-      resource:resources(title, category, location)
-    `)
-    .single();
-
-  if (error) {
-    console.error('Booking creation failed:', error.message);
-    throw error;
-  }
-
-  return data as Booking;
-}
-```
-
-### 3.3 Approving or Rejecting a Booking (Owner Action)
-
-```typescript
-import { supabase } from '@/lib/supabaseClient';
-import type { BookingStatus, Booking } from '@/types/domain';
-
-export async function updateBookingStatus(
-  bookingId: string,
-  newStatus: 'approved' | 'rejected',
-  rejectionReason?: string
-): Promise<Booking> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('User not authenticated');
-
-  const payload: Record<string, unknown> = {
-    status: newStatus,
-    approved_by: newStatus === 'approved' ? user.id : null,
-  };
-
-  if (rejectionReason) {
-    payload.rejection_reason = rejectionReason;
-  }
-
-  const { data, error } = await supabase
-    .from('bookings')
-    .update(payload)
-    .eq('id', bookingId)
-    .select()
-    .single();
-
-  if (error) {
-    console.error('Failed to update booking status:', error.message);
-    throw error;
-  }
-
-  return data as Booking;
-}
-```
-
-### 3.4 Submitting Condition Reports (Inspection)
-
-```typescript
-import { supabase } from '@/lib/supabaseClient';
-import type { CreateConditionReportDTO, ConditionReport } from '@/types/domain';
-
-export async function submitConditionReport(
-  dto: CreateConditionReportDTO
-): Promise<ConditionReport> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('User not authenticated');
-
-  const { data, error } = await supabase
-    .from('condition_reports')
-    .insert({
-      booking_id: dto.booking_id,
-      submitted_by: user.id,
-      report_type: dto.report_type,
-      condition_status: dto.condition_status,
-      notes: dto.notes ?? null,
-      image_url: dto.image_url ?? null,
-    })
-    .select()
-    .single();
-
-  if (error) {
-    console.error('Condition report submission error:', error.message);
-    throw error;
-  }
-
-  return data as ConditionReport;
-}
-```
-
-### 3.5 Realtime Notifications Subscription
-
-ResourceLoop emits database-level notifications on booking updates. Listen for updates in React:
-
-```typescript
-import { useEffect, useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
-import type { Notification } from '@/types/domain';
-
-export function useNotifications(userId: string | undefined) {
-  const [notifications, setNotifications] = useState<Notification[]>([]);
-
-  useEffect(() => {
-    if (!userId) return;
-
-    // 1. Initial fetch
-    supabase
-      .from('notifications')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(20)
-      .then(({ data }) => {
-        if (data) setNotifications(data as Notification[]);
-      });
-
-    // 2. Realtime listener
-    const channel = supabase
-      .channel(`user-notifications-${userId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'notifications',
-          filter: `user_id=eq.${userId}`,
-        },
-        (payload) => {
-          setNotifications((prev) => [payload.new as Notification, ...prev]);
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [userId]);
-
-  return notifications;
-}
-```
-
----
-
-## 4. Error Codes & Handling Patterns
-
-| Error Scenario | Supabase / PG Code | Reason | Recommended UI Action |
-| :--- | :--- | :--- | :--- |
-| **RLS Permission Denied** | `42501` / `PGRST301` | User tried to update a booking or resource they do not own, or tried to escalate their role. | Display a toast notification: *"You do not have permission to perform this action."* |
-| **Invalid Time Range** | `23514` (`booking_time_order`) | `end_time` is earlier than or equal to `start_time`. | Show form validation error: *"End time must be after start time."* |
-| **Duplicate Inspection** | `23505` (`unique_booking_report_stage`) | A condition report for this stage (`before` or `after`) was already submitted. | Disable button and show *"Report already submitted for this stage."* |
-| **Foreign Key Missing** | `23503` | Referenced resource or organization does not exist. | Navigate back to resource catalogue. |
-
----
-
-## 5. Storage Buckets Setup (Supabase Storage)
-
-For equipment photos and inspection condition reports:
-1. Create a public bucket: `resource-images` (For resource catalogue listings).
-2. Create an authenticated bucket: `condition-reports` (For inspection documentation).
+1. **Role Guard**: Normal signups are assigned `seeker`. Users cannot escalate their own role to `owner` or `admin`.
+2. **Resource Ownership**: Owners can only manage resources belonging to their organization. Seekers cannot mutate resource data.
+3. **Audit Trail**: All booking creation and status updates are logged immutably in `audit_logs`.
+4. **RLS Verification**: Never disable RLS in client queries. Authenticated sessions rely on the Supabase JWT.

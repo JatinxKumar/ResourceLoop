@@ -307,3 +307,32 @@ export interface UpdateProfileDTO {
   avatar_url?: string;
   organization_id?: string;
 }
+
+/**
+ * Filter and search criteria for resource catalogue queries
+ */
+export interface ResourceFilters {
+  query?: string;
+  category?: string;
+  resource_type?: ResourceType;
+  organization_id?: string;
+  status?: ResourceStatus;
+  available_only?: boolean;
+  training_required?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Detailed eligibility assessment response
+ */
+export interface ResourceEligibilityResult {
+  eligible: boolean;
+  reasons: string[];
+  checks: {
+    isActive: boolean;
+    isAvailable: boolean;
+    trainingRequired: boolean;
+    hasOrganizationAffiliation: boolean;
+  };
+}
