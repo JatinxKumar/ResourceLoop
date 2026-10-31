@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Search, Filter, SlidersHorizontal, Building, Layers, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react'
-import { useResourceDiscovery, listOrganizations } from '@/hooks/useResources'
+import { Search, Building, Layers, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react'
+import { useResourceDiscovery, getOrganizations } from '@/hooks/useResources'
 import { ResourceCard } from '@/components/resources/ResourceCard'
 import { EmptyState } from '@/components/common/EmptyState'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
@@ -19,16 +19,16 @@ export const ResourceDiscoveryPage: React.FC = () => {
   const [organizations, setOrganizations] = useState<Organization[]>([])
 
   const { resources, loading, error, setFilters, refetch } = useResourceDiscovery({
-    search: initialSearch,
-    category: 'all',
-    resourceType: 'all',
-    status: 'all',
-    organizationId: 'all'
+    query: initialSearch || undefined,
+    category: undefined,
+    resource_type: undefined,
+    status: undefined,
+    organization_id: undefined
   })
 
-  // Load organizations for filter dropdown
+  // Load organizations for filter dropdown using backend service
   useEffect(() => {
-    listOrganizations().then(setOrganizations)
+    getOrganizations().then(setOrganizations).catch(() => setOrganizations([]))
   }, [])
 
   // Sync state changes with the hook filters
@@ -40,11 +40,11 @@ export const ResourceDiscoveryPage: React.FC = () => {
     org: string
   ) => {
     setFilters({
-      search: term.trim() || undefined,
+      query: term.trim() || undefined,
       category: cat !== 'all' ? cat : undefined,
-      resourceType: type !== 'all' ? type : undefined,
+      resource_type: type !== 'all' ? type : undefined,
       status: stat !== 'all' ? stat : undefined,
-      organizationId: org !== 'all' ? org : undefined
+      organization_id: org !== 'all' ? org : undefined
     })
 
     if (term.trim()) {
@@ -130,7 +130,7 @@ export const ResourceDiscoveryPage: React.FC = () => {
         <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-start gap-3">
           <AlertCircle className="w-5 h-5 text-rose-600 flex-shrink-0 mt-0.5" />
           <div className="space-y-1">
-            <span className="font-bold">Catalog Connection Error</span>
+            <span className="font-bold">Catalog Service Error</span>
             <p className="text-[11px] text-rose-700">{error}</p>
           </div>
         </div>
@@ -220,7 +220,7 @@ export const ResourceDiscoveryPage: React.FC = () => {
 
       {/* Catalog Grid or Empty/Loading State */}
       {loading ? (
-        <LoadingSpinner label="Querying Supabase resource catalogue..." />
+        <LoadingSpinner label="Querying Supabase resource catalogue via service layer..." />
       ) : resources.length > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {resources.map((res) => (

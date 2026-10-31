@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react'
-import type { User, Session, AuthError } from '@supabase/supabase-js'
+import type { User } from '@supabase/supabase-js'
 import { supabase, isSupabaseConfigured } from '@/lib/supabase'
+import { getCurrentProfile } from '@/services/profiles'
 import type { Profile, UserRole } from '@/types/domain'
 
 interface AuthContextType {
@@ -27,32 +28,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const clearError = () => setError(null)
 
-  // Fetch full profile from public.profiles table
-  const fetchProfile = useCallback(async (userId: string): Promise<Profile | null> => {
+  // Fetch full profile delegating to the backend profile service
+  const fetchProfile = useCallback(async (): Promise<Profile | null> => {
     try {
-      const { data, error: profileError } = await supabase
-        .from('profiles')
-        .select(`
-          *,
-          organization:organizations(*)
-        `)
-        .eq('id', userId)
-        .maybeSingle()
-
-      if (profileError) {
-        console.error('Error fetching user profile:', profileError.message)
-        return null
-      }
-
+      const data = await getCurrentProfile()
       if (data) {
-        const fullProfile = data as Profile
-        setProfile(fullProfile)
-        return fullProfile
+        setProfile(data)
+        return data
       }
-
       return null
     } catch (err: unknown) {
-      console.error('Unexpected error fetching profile:', err)
+      console.error('Unexpected error fetching profile via service:', err)
       return null
     }
   }, [])
@@ -76,7 +62,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         if (session?.user && mounted) {
           setUser(session.user)
-          await fetchProfile(session.user.id)
+          await fetchProfile()
         }
       } catch (err: unknown) {
         console.error('Auth initialization error:', err)
@@ -93,8 +79,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       if (session?.user) {
         setUser(session.user)
-        // Fetch or refresh the database profile
-        await fetchProfile(session.user.id)
+        await fetchProfile()
       } else {
         setUser(null)
         setProfile(null)
@@ -127,7 +112,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       if (data.user) {
         setUser(data.user)
-        const loadedProfile = await fetchProfile(data.user.id)
+        const loadedProfile = await fetchProfile()
         setLoading(false)
         return { error: null, profile: loadedProfile }
       }
@@ -167,8 +152,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       if (data.user) {
         setUser(data.user)
-        // Profile will be auto-provisioned by the PostgreSQL handle_new_user trigger
-        await fetchProfile(data.user.id)
+        await fetchProfile()
       }
 
       setLoading(false)
@@ -203,7 +187,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (refreshError) throw refreshError
       if (session?.user) {
         setUser(session.user)
-        await fetchProfile(session.user.id)
+        await fetchProfile()
       }
     } catch (err: unknown) {
       console.error('Failed to refresh session:', err)
