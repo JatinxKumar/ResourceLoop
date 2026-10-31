@@ -1,98 +1,231 @@
-import React, { createContext, useContext, useState, useEffect } from 'react'
-
-export type UserRole = 'seeker' | 'owner' | 'admin'
-
-export interface UserProfile {
-  id: string
-  name: string
-  email: string
-  role: UserRole
-  department: string
-  trustScore: number
-  avatarUrl: string
-}
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import type { User, Session, AuthError } from '@supabase/supabase-js'
+import { supabase, isSupabaseConfigured } from '@/lib/supabase'
+import type { Profile, UserRole } from '@/types/domain'
 
 interface AuthContextType {
-  user: UserProfile | null
+  user: User | null
+  profile: Profile | null
   role: UserRole
-  setRole: (role: UserRole) => void
-  login: (email: string, role?: UserRole) => void
-  logout: () => void
+  loading: boolean
+  error: string | null
   isAuthenticated: boolean
-}
-
-const DEFAULT_USERS: Record<UserRole, UserProfile> = {
-  seeker: {
-    id: 'usr-seeker-1',
-    name: 'Jatin Kumar',
-    email: 'jatin.k@inst.edu',
-    role: 'seeker',
-    department: 'Materials Science & AI Research',
-    trustScore: 98,
-    avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80'
-  },
-  owner: {
-    id: 'usr-owner-1',
-    name: 'Dr. Aris Thorne',
-    email: 'a.thorne@inst.edu',
-    role: 'owner',
-    department: 'Advanced Instrumentation Facility',
-    trustScore: 100,
-    avatarUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=200&q=80'
-  },
-  admin: {
-    id: 'usr-admin-1',
-    name: 'Dean Eleanor Vance',
-    email: 'dean.vance@inst.edu',
-    role: 'admin',
-    department: 'Office of Campus Research & Operations',
-    trustScore: 100,
-    avatarUrl: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&w=200&q=80'
-  }
+  login: (email: string, password: string) => Promise<{ error: Error | null; profile?: Profile | null }>
+  signup: (email: string, password: string, fullName: string) => Promise<{ error: Error | null; user?: User | null }>
+  logout: () => Promise<void>
+  refreshSession: () => Promise<void>
+  clearError: () => void
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [role, setRoleState] = useState<UserRole>('seeker')
-  const [user, setUser] = useState<UserProfile | null>(DEFAULT_USERS.seeker)
+  const [user, setUser] = useState<User | null>(null)
+  const [profile, setProfile] = useState<Profile | null>(null)
+  const [loading, setLoading] = useState<boolean>(true)
+  const [error, setError] = useState<string | null>(null)
 
-  const setRole = (newRole: UserRole) => {
-    setRoleState(newRole)
-    setUser(DEFAULT_USERS[newRole])
-    localStorage.setItem('resourceloop_demo_role', newRole)
-  }
+  const clearError = () => setError(null)
 
-  useEffect(() => {
-    const savedRole = localStorage.getItem('resourceloop_demo_role') as UserRole
-    if (savedRole && DEFAULT_USERS[savedRole]) {
-      setRoleState(savedRole)
-      setUser(DEFAULT_USERS[savedRole])
+  // Fetch full profile from public.profiles table
+  const fetchProfile = useCallback(async (userId: string): Promise<Profile | null> => {
+    try {
+      const { data, error: profileError } = await supabase
+        .from('profiles')
+        .select(`
+          *,
+          organization:organizations(*)
+        `)
+        .eq('id', userId)
+        .maybeSingle()
+
+      if (profileError) {
+        console.error('Error fetching user profile:', profileError.message)
+        return null
+      }
+
+      if (data) {
+        const fullProfile = data as Profile
+        setProfile(fullProfile)
+        return fullProfile
+      }
+
+      return null
+    } catch (err: unknown) {
+      console.error('Unexpected error fetching profile:', err)
+      return null
     }
   }, [])
 
-  const login = (email: string, designatedRole: UserRole = 'seeker') => {
-    const matched = {
-      ...DEFAULT_USERS[designatedRole],
-      email: email || DEFAULT_USERS[designatedRole].email
+  // Initialize auth session on mount
+  useEffect(() => {
+    let mounted = true
+
+    const initializeAuth = async () => {
+      setLoading(true)
+      try {
+        if (!isSupabaseConfigured()) {
+          setLoading(false)
+          return
+        }
+
+        const { data: { session }, error: sessionError } = await supabase.auth.getSession()
+        if (sessionError) {
+          console.error('Error retrieving session:', sessionError.message)
+        }
+
+        if (session?.user && mounted) {
+          setUser(session.user)
+          await fetchProfile(session.user.id)
+        }
+      } catch (err: unknown) {
+        console.error('Auth initialization error:', err)
+      } finally {
+        if (mounted) setLoading(false)
+      }
     }
-    setUser(matched)
-    setRoleState(designatedRole)
+
+    initializeAuth()
+
+    // Listen to real-time auth state changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (!mounted) return
+
+      if (session?.user) {
+        setUser(session.user)
+        // Fetch or refresh the database profile
+        await fetchProfile(session.user.id)
+      } else {
+        setUser(null)
+        setProfile(null)
+      }
+      setLoading(false)
+    })
+
+    return () => {
+      mounted = false
+      subscription.unsubscribe()
+    }
+  }, [fetchProfile])
+
+  // Real Supabase login
+  const login = async (email: string, password: string) => {
+    setError(null)
+    setLoading(true)
+
+    try {
+      const { data, error: signInError } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password: password
+      })
+
+      if (signInError) {
+        setError(signInError.message)
+        setLoading(false)
+        return { error: signInError }
+      }
+
+      if (data.user) {
+        setUser(data.user)
+        const loadedProfile = await fetchProfile(data.user.id)
+        setLoading(false)
+        return { error: null, profile: loadedProfile }
+      }
+
+      setLoading(false)
+      return { error: new Error('Authentication succeeded but no user returned.') }
+    } catch (err: unknown) {
+      const authErr = err instanceof Error ? err : new Error('An unexpected error occurred during login.')
+      setError(authErr.message)
+      setLoading(false)
+      return { error: authErr }
+    }
   }
 
-  const logout = () => {
-    setUser(null)
+  // Real Supabase signup (strictly creates a seeker account)
+  const signup = async (email: string, password: string, fullName: string) => {
+    setError(null)
+    setLoading(true)
+
+    try {
+      const { data, error: signUpError } = await supabase.auth.signUp({
+        email: email.trim(),
+        password: password,
+        options: {
+          data: {
+            full_name: fullName.trim(),
+            role: 'seeker' // Strictly seeker for public registration
+          }
+        }
+      })
+
+      if (signUpError) {
+        setError(signUpError.message)
+        setLoading(false)
+        return { error: signUpError }
+      }
+
+      if (data.user) {
+        setUser(data.user)
+        // Profile will be auto-provisioned by the PostgreSQL handle_new_user trigger
+        await fetchProfile(data.user.id)
+      }
+
+      setLoading(false)
+      return { error: null, user: data.user }
+    } catch (err: unknown) {
+      const authErr = err instanceof Error ? err : new Error('An unexpected error occurred during registration.')
+      setError(authErr.message)
+      setLoading(false)
+      return { error: authErr }
+    }
   }
+
+  // Real Supabase logout
+  const logout = async () => {
+    setLoading(true)
+    try {
+      await supabase.auth.signOut()
+    } catch (err) {
+      console.error('Error signing out:', err)
+    } finally {
+      setUser(null)
+      setProfile(null)
+      setError(null)
+      setLoading(false)
+    }
+  }
+
+  // Refresh current session
+  const refreshSession = async () => {
+    try {
+      const { data: { session }, error: refreshError } = await supabase.auth.refreshSession()
+      if (refreshError) throw refreshError
+      if (session?.user) {
+        setUser(session.user)
+        await fetchProfile(session.user.id)
+      }
+    } catch (err: unknown) {
+      console.error('Failed to refresh session:', err)
+    }
+  }
+
+  const role: UserRole = profile?.role ?? 'seeker'
 
   return (
     <AuthContext.Provider
       value={{
         user,
+        profile,
         role,
-        setRole,
+        loading,
+        error,
+        isAuthenticated: !!user,
         login,
+        signup,
         logout,
-        isAuthenticated: !!user
+        refreshSession,
+        clearError
       }}
     >
       {children}

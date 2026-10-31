@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import {
   ArrowLeft,
@@ -9,30 +9,69 @@ import {
   CheckCircle2,
   AlertTriangle,
   Clock,
-  Star,
-  FileText
+  Building,
+  FileText,
+  AlertCircle,
+  Tag
 } from 'lucide-react'
-import { DEMO_RESOURCES } from '@/utils/ui-fixtures'
+import { getResourceById } from '@/hooks/useResources'
+import { requestBooking } from '@/hooks/useBookings'
+import { useAuth } from '@/contexts/AuthContext'
 import { StatusBadge } from '@/components/common/StatusBadge'
+import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { EmptyState } from '@/components/common/EmptyState'
+import type { Resource } from '@/types/domain'
+
+const DEFAULT_RESOURCE_IMAGE = 'https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=1200&q=80'
 
 export const ResourceDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const resource = DEMO_RESOURCES.find((r) => r.id === id)
+  const { user, isAuthenticated } = useAuth()
 
-  const [startDate, setStartDate] = useState('2026-11-05')
-  const [endDate, setEndDate] = useState('2026-11-07')
+  const [resource, setResource] = useState<Resource | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [fetchError, setFetchError] = useState<string | null>(null)
+
+  // Booking Form State
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
   const [purpose, setPurpose] = useState('')
-  const [supervisorSigned, setSupervisorSigned] = useState(true)
-  const [submitted, setSubmitted] = useState(false)
+  const [supervisorConfirmed, setSupervisorConfirmed] = useState(true)
+  const [submittingBooking, setSubmittingBooking] = useState(false)
+  const [bookingError, setBookingError] = useState<string | null>(null)
+  const [bookingSuccess, setBookingSuccess] = useState(false)
 
-  if (!resource) {
+  // Load resource details from Supabase
+  useEffect(() => {
+    if (!id) return
+
+    setLoading(true)
+    setFetchError(null)
+
+    getResourceById(id)
+      .then((data) => {
+        setResource(data)
+      })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Failed to load resource.'
+        setFetchError(msg)
+      })
+      .finally(() => {
+        setLoading(false)
+      })
+  }, [id])
+
+  if (loading) {
+    return <LoadingSpinner fullPage label="Retrieving equipment specifications from Supabase..." />
+  }
+
+  if (fetchError || !resource) {
     return (
       <div className="py-12">
         <EmptyState
           title="Equipment Not Found"
-          description="The requested institutional resource code does not exist in the active catalog."
+          description={fetchError || 'The requested institutional resource ID could not be located in the database.'}
           actionLabel="Back to Catalog"
           onAction={() => navigate('/resources')}
         />
@@ -40,9 +79,49 @@ export const ResourceDetailPage: React.FC = () => {
     )
   }
 
-  const handleBooking = (e: React.FormEvent) => {
+  const handleBookingSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    setSubmitted(true)
+    setBookingError(null)
+
+    if (!isAuthenticated || !user) {
+      navigate('/login', { state: { from: { pathname: `/resources/${resource.id}` } } })
+      return
+    }
+
+    if (!startDate || !endDate) {
+      setBookingError('Please specify valid start and end reservation timestamps.')
+      return
+    }
+
+    const start = new Date(startDate)
+    const end = new Date(endDate)
+
+    if (end <= start) {
+      setBookingError('Reservation end time must be after start time.')
+      return
+    }
+
+    if (!purpose.trim()) {
+      setBookingError('Please describe the research purpose and project identifier.')
+      return
+    }
+
+    setSubmittingBooking(true)
+
+    try {
+      await requestBooking({
+        resource_id: resource.id,
+        start_time: start.toISOString(),
+        end_time: end.toISOString(),
+        purpose: purpose.trim()
+      })
+      setBookingSuccess(true)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to create reservation request.'
+      setBookingError(msg)
+    } finally {
+      setSubmittingBooking(false)
+    }
   }
 
   return (
@@ -54,7 +133,7 @@ export const ResourceDetailPage: React.FC = () => {
           <span>Catalog</span>
         </Link>
         <span>/</span>
-        <span className="text-slate-400">{resource.category}</span>
+        <span className="text-slate-400 capitalize">{resource.category}</span>
         <span>/</span>
         <span className="font-semibold text-navy-950 truncate max-w-xs">{resource.title}</span>
       </div>
@@ -66,13 +145,17 @@ export const ResourceDetailPage: React.FC = () => {
           <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
             <div className="relative h-72 sm:h-96 w-full bg-slate-100">
               <img
-                src={resource.imageUrl}
+                src={resource.image_url || DEFAULT_RESOURCE_IMAGE}
                 alt={resource.title}
                 className="w-full h-full object-cover"
+                onError={(e) => {
+                  e.currentTarget.src = DEFAULT_RESOURCE_IMAGE
+                }}
               />
               <div className="absolute top-4 left-4 flex gap-2">
-                <span className="px-3 py-1 rounded-md bg-white/95 backdrop-blur-md text-xs font-bold text-navy-900 shadow-sm">
-                  {resource.category}
+                <span className="px-3 py-1 rounded-md bg-white/95 backdrop-blur-md text-xs font-bold text-navy-900 shadow-sm flex items-center gap-1">
+                  <Tag className="w-3.5 h-3.5 text-slate-500" />
+                  <span>{resource.category}</span>
                 </span>
                 <StatusBadge status={resource.status} />
               </div>
@@ -81,11 +164,11 @@ export const ResourceDetailPage: React.FC = () => {
             <div className="p-6 sm:p-8 space-y-4">
               <div>
                 <div className="flex items-center gap-3 text-xs text-slate-500 mb-1">
-                  <span className="font-mono bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-semibold">
-                    {resource.code}
+                  <span className="font-semibold capitalize text-brand-700 bg-brand-50 px-2 py-0.5 rounded">
+                    {resource.resource_type}
                   </span>
                   <span>•</span>
-                  <span>{resource.department}</span>
+                  <span>{resource.organization?.name || 'Institutional Network'}</span>
                 </div>
                 <h1 className="text-2xl sm:text-3xl font-extrabold text-navy-950 tracking-tight">
                   {resource.title}
@@ -93,49 +176,70 @@ export const ResourceDetailPage: React.FC = () => {
               </div>
 
               <p className="text-sm text-slate-600 leading-relaxed">
-                {resource.description}
+                {resource.description || 'No detailed description provided by the facility custodian.'}
               </p>
 
-              {/* Custody location and ratings */}
+              {/* Custody location and metadata */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-4 border-t border-slate-100 text-xs text-slate-600">
                 <div className="flex items-center gap-2">
                   <MapPin className="w-4 h-4 text-brand-600 flex-shrink-0" />
                   <span>{resource.location}</span>
                 </div>
+                {resource.owner?.full_name && (
+                  <div className="flex items-center gap-2">
+                    <User className="w-4 h-4 text-brand-600 flex-shrink-0" />
+                    <span>Custodian: {resource.owner.full_name}</span>
+                  </div>
+                )}
                 <div className="flex items-center gap-2">
-                  <User className="w-4 h-4 text-brand-600 flex-shrink-0" />
-                  <span>{resource.custodian}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Star className="w-4 h-4 text-amber-500 fill-amber-500 flex-shrink-0" />
-                  <span>{resource.rating.toFixed(1)} Institutional Score ({resource.reviewsCount} reviews)</span>
+                  <Building className="w-4 h-4 text-brand-600 flex-shrink-0" />
+                  <span>Org: {resource.organization?.name || 'Verified Lab'}</span>
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Technical Specifications Table */}
+          {/* Operational & Eligibility Specifications */}
           <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4">
             <h2 className="text-base font-bold text-navy-950 flex items-center gap-2">
               <FileText className="w-4 h-4 text-brand-600" />
-              <span>Technical & Operational Specifications</span>
+              <span>Operational & Eligibility Specifications</span>
             </h2>
 
             <div className="border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-100 text-xs">
-              {Object.entries(resource.specifications).map(([key, val]) => (
-                <div key={key} className="grid grid-cols-3 p-3 bg-white hover:bg-slate-50 transition-colors">
-                  <span className="font-semibold text-slate-600">{key}</span>
-                  <span className="col-span-2 text-navy-950 font-medium">{val}</span>
-                </div>
-              ))}
               <div className="grid grid-cols-3 p-3 bg-white">
-                <span className="font-semibold text-slate-600">Maximum Reservation Duration</span>
-                <span className="col-span-2 text-navy-950 font-medium">{resource.maxDurationDays} consecutive days</span>
+                <span className="font-semibold text-slate-600">Resource Classification</span>
+                <span className="col-span-2 text-navy-950 font-medium capitalize">{resource.resource_type}</span>
               </div>
               <div className="grid grid-cols-3 p-3 bg-white">
-                <span className="font-semibold text-slate-600">Institutional Escrow Policy</span>
+                <span className="font-semibold text-slate-600">Operator Training Required</span>
                 <span className="col-span-2 text-navy-950 font-medium">
-                  {resource.depositRequired ? `$${resource.depositAmount} campus liability hold` : 'Standard department cross-guarantee'}
+                  {resource.training_required ? (
+                    <span className="text-amber-700 font-semibold flex items-center gap-1">
+                      <ShieldCheck className="w-4 h-4 text-amber-600" />
+                      Yes — Certified Operator Level required
+                    </span>
+                  ) : (
+                    'Standard Laboratory Induction'
+                  )}
+                </span>
+              </div>
+              <div className="grid grid-cols-3 p-3 bg-white">
+                <span className="font-semibold text-slate-600">Eligibility Conditions</span>
+                <span className="col-span-2 text-navy-950 font-medium">
+                  {resource.eligibility_requirements || 'Open to all verified institutional researchers with faculty approval.'}
+                </span>
+              </div>
+              <div className="grid grid-cols-3 p-3 bg-white">
+                <span className="font-semibold text-slate-600">Simultaneous Booking Limit</span>
+                <span className="col-span-2 text-navy-950 font-medium">
+                  {resource.usage_limit_per_user} concurrent active session(s) per user
+                </span>
+              </div>
+              <div className="grid grid-cols-3 p-3 bg-white">
+                <span className="font-semibold text-slate-600">Standard Access Schedule</span>
+                <span className="col-span-2 text-navy-950 font-medium">
+                  {resource.availability_info?.days?.join(', ') || 'Monday - Friday'} ({resource.availability_info?.hours || '09:00 - 18:00'})
                 </span>
               </div>
             </div>
@@ -143,73 +247,83 @@ export const ResourceDetailPage: React.FC = () => {
         </div>
 
         {/* Right Column: Reservation Booking Box */}
-        <div className="lg:col-span-4 space-y-6">
+        <div id="book" className="lg:col-span-4 space-y-6">
           <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-card sticky top-20">
             <h3 className="text-base font-bold text-navy-950 mb-1">
               Request Instrument Access
             </h3>
             <p className="text-xs text-slate-500 mb-5">
-              Submit reservation for automated supervisor routing and custodian authorization.
+              Submit a formal reservation request. It will be recorded in the Supabase ledger and routed to the custodian.
             </p>
 
-            {submitted ? (
-              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-5 text-center space-y-3">
+            {bookingSuccess ? (
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-5 text-center space-y-3 animate-fade-in">
                 <div className="w-10 h-10 rounded-full bg-emerald-600 text-white flex items-center justify-center mx-auto">
                   <CheckCircle2 className="w-6 h-6" />
                 </div>
-                <h4 className="text-sm font-bold text-emerald-950">Access Request Queued</h4>
+                <h4 className="text-sm font-bold text-emerald-950">Reservation Submitted</h4>
                 <p className="text-xs text-emerald-800 leading-relaxed">
-                  Your request has been routed to <strong>{resource.custodian}</strong>. You can view its progress on your bookings page.
+                  Your reservation request has been created in Supabase with status <strong>pending</strong>.
                 </p>
                 <div className="pt-2">
                   <Link
                     to="/bookings"
                     className="inline-flex items-center gap-1 text-xs font-bold text-emerald-800 hover:text-emerald-950 underline"
                   >
-                    <span>Go to My Bookings</span>
+                    <span>View in My Bookings</span>
                     <span>→</span>
                   </Link>
                 </div>
               </div>
             ) : (
-              <form onSubmit={handleBooking} className="space-y-4">
+              <form onSubmit={handleBookingSubmit} className="space-y-4">
+                {bookingError && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-800 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                    <p>{bookingError}</p>
+                  </div>
+                )}
+
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Start Date
+                    Start Date & Time
                   </label>
                   <input
-                    type="date"
+                    type="datetime-local"
                     required
                     value={startDate}
                     onChange={(e) => setStartDate(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 text-navy-900"
+                    disabled={submittingBooking || resource.status !== 'available'}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 text-navy-900 disabled:bg-slate-100"
                   />
                 </div>
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    End Date
+                    End Date & Time
                   </label>
                   <input
-                    type="date"
+                    type="datetime-local"
                     required
                     value={endDate}
                     onChange={(e) => setEndDate(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 text-navy-900"
+                    disabled={submittingBooking || resource.status !== 'available'}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 text-navy-900 disabled:bg-slate-100"
                   />
                 </div>
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Research Purpose & Project ID
+                    Research Purpose & Grant ID
                   </label>
                   <textarea
                     rows={3}
                     required
                     value={purpose}
                     onChange={(e) => setPurpose(e.target.value)}
-                    placeholder="Briefly describe the experiment or thesis study utilizing this apparatus..."
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 text-navy-900"
+                    placeholder="Describe the research experimental protocol or thesis objective..."
+                    disabled={submittingBooking || resource.status !== 'available'}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 text-navy-900 disabled:bg-slate-100"
                   />
                 </div>
 
@@ -217,28 +331,32 @@ export const ResourceDetailPage: React.FC = () => {
                   <label className="flex items-start gap-2 cursor-pointer select-none">
                     <input
                       type="checkbox"
-                      checked={supervisorSigned}
-                      onChange={(e) => setSupervisorSigned(e.target.checked)}
+                      checked={supervisorConfirmed}
+                      onChange={(e) => setSupervisorConfirmed(e.target.checked)}
                       className="mt-0.5 w-4 h-4 rounded text-brand-600 focus:ring-brand-500 border-slate-300"
                     />
                     <span className="text-[11px] text-slate-600 leading-snug">
-                      I confirm I hold prerequisite training certifications and faculty sponsorship.
+                      I confirm compliance with prerequisite lab training and equipment safety rules.
                     </span>
                   </label>
                 </div>
 
                 <button
                   type="submit"
-                  disabled={resource.status === 'maintenance'}
+                  disabled={submittingBooking || resource.status !== 'available'}
                   className={`w-full py-2.5 px-4 rounded-lg text-xs font-bold shadow-sm transition-all flex items-center justify-center gap-2 ${
-                    resource.status === 'maintenance'
+                    resource.status !== 'available'
                       ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
                       : 'bg-brand-600 hover:bg-brand-700 text-white focus:outline-none focus:ring-2 focus:ring-brand-500'
                   }`}
                 >
                   <Calendar className="w-4 h-4" />
                   <span>
-                    {resource.status === 'maintenance' ? 'Unavailable (Under Maintenance)' : 'Submit Access Request'}
+                    {submittingBooking
+                      ? 'Recording in Supabase...'
+                      : resource.status !== 'available'
+                      ? `Unavailable (${resource.status})`
+                      : 'Submit Reservation Request'}
                   </span>
                 </button>
               </form>
@@ -246,7 +364,7 @@ export const ResourceDetailPage: React.FC = () => {
 
             <div className="mt-5 pt-4 border-t border-slate-100 flex items-center gap-2 text-xs text-slate-400">
               <ShieldCheck className="w-4 h-4 text-emerald-600 flex-shrink-0" />
-              <span>Campus QR Custody Protocol guarantees liability coverage.</span>
+              <span>Governed by PostgreSQL Row Level Security & Audit Log.</span>
             </div>
           </div>
         </div>

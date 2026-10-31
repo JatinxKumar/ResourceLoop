@@ -3,13 +3,14 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider } from '@/contexts/AuthContext'
 import { MainLayout } from '@/layouts/MainLayout'
 import { DashboardLayout } from '@/layouts/DashboardLayout'
+import { ProtectedRoute } from '@/components/common/ProtectedRoute'
 
 // Public Pages
 import { LandingPage } from '@/pages/LandingPage'
 import { LoginPage } from '@/pages/LoginPage'
 import { SignupPage } from '@/pages/SignupPage'
 
-// Protected / App Pages
+// Protected Application Pages
 import { SeekerDashboardPage } from '@/pages/SeekerDashboardPage'
 import { ResourceDiscoveryPage } from '@/pages/ResourceDiscoveryPage'
 import { ResourceDetailPage } from '@/pages/ResourceDetailPage'
@@ -30,18 +31,72 @@ export const App: React.FC = () => {
             <Route path="/signup" element={<SignupPage />} />
           </Route>
 
-          {/* Institutional Portal Routes with Sidebar & Header */}
+          {/* Institutional Portal Routes Protected by Supabase Auth & Role-Gated */}
           <Route element={<DashboardLayout />}>
-            <Route path="/dashboard" element={<SeekerDashboardPage />} />
-            <Route path="/resources" element={<ResourceDiscoveryPage />} />
-            <Route path="/resources/:id" element={<ResourceDetailPage />} />
-            <Route path="/bookings" element={<MyBookingsPage />} />
-            <Route path="/owner" element={<OwnerDashboardPage />} />
-            <Route path="/admin" element={<AdminDashboardPage />} />
-            <Route path="/impact" element={<ImpactDashboardPage />} />
+            {/* Seeker / Common Authenticated Routes */}
+            <Route
+              path="/dashboard"
+              element={
+                <ProtectedRoute allowedRoles={['seeker', 'owner', 'admin']}>
+                  <SeekerDashboardPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/resources"
+              element={
+                <ProtectedRoute allowedRoles={['seeker', 'owner', 'admin']}>
+                  <ResourceDiscoveryPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/resources/:id"
+              element={
+                <ProtectedRoute allowedRoles={['seeker', 'owner', 'admin']}>
+                  <ResourceDetailPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/bookings"
+              element={
+                <ProtectedRoute allowedRoles={['seeker', 'owner', 'admin']}>
+                  <MyBookingsPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/impact"
+              element={
+                <ProtectedRoute allowedRoles={['seeker', 'owner', 'admin']}>
+                  <ImpactDashboardPage />
+                </ProtectedRoute>
+              }
+            />
+
+            {/* Owner-Only Console (Owner & Admin) */}
+            <Route
+              path="/owner"
+              element={
+                <ProtectedRoute allowedRoles={['owner', 'admin']}>
+                  <OwnerDashboardPage />
+                </ProtectedRoute>
+              }
+            />
+
+            {/* Admin-Only Console */}
+            <Route
+              path="/admin"
+              element={
+                <ProtectedRoute allowedRoles={['admin']}>
+                  <AdminDashboardPage />
+                </ProtectedRoute>
+              }
+            />
           </Route>
 
-          {/* Catch-all redirect */}
+          {/* Fallback */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>

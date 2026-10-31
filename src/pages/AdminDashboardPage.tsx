@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState, useEffect } from 'react'
 import {
   Server,
   Users,
@@ -8,52 +8,55 @@ import {
   CheckCircle2,
   Building,
   FileSpreadsheet,
-  Info
+  AlertCircle,
+  RefreshCw
 } from 'lucide-react'
-import { DEMO_ADMIN_STATS } from '@/utils/ui-fixtures'
+import { supabase } from '@/lib/supabase'
 import { StatCard } from '@/components/dashboard/StatCard'
+import { LoadingSpinner } from '@/components/common/LoadingSpinner'
+import type { Organization, Profile, Resource, Booking } from '@/types/domain'
 
 export const AdminDashboardPage: React.FC = () => {
-  const statIcons = [Server, Users, Repeat, TrendingUp]
+  const [organizations, setOrganizations] = useState<Organization[]>([])
+  const [totalResources, setTotalResources] = useState<number>(0)
+  const [totalUsers, setTotalUsers] = useState<number>(0)
+  const [totalBookings, setTotalBookings] = useState<number>(0)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-  const departmentsData = [
-    { name: 'Materials Science & NanoTech', assets: 114, activeLoans: 42, trustScore: '99.4%', status: 'Compliant' },
-    { name: 'School of Computer Science & AI', assets: 68, activeLoans: 58, trustScore: '98.8%', status: 'Compliant' },
-    { name: 'Mechanical & Robotics Foundry', assets: 92, activeLoans: 31, trustScore: '97.2%', status: 'Compliant' },
-    { name: 'Biomedical & Life Sciences', assets: 120, activeLoans: 49, trustScore: '99.1%', status: 'Compliant' },
-    { name: 'Film, Media & Communications', assets: 45, activeLoans: 22, trustScore: '96.5%', status: 'Review Flag' },
-    { name: 'Earth & Environmental Sciences', assets: 47, activeLoans: 18, trustScore: '98.0%', status: 'Compliant' },
-  ]
+  const loadAdminTelemetry = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const [orgsRes, resCountRes, usersCountRes, bookingsCountRes] = await Promise.all([
+        supabase.from('organizations').select('*').order('name'),
+        supabase.from('resources').select('*', { count: 'exact', head: true }),
+        supabase.from('profiles').select('*', { count: 'exact', head: true }),
+        supabase.from('bookings').select('*', { count: 'exact', head: true })
+      ])
 
-  const complianceAlerts = [
-    {
-      id: 'al-1',
-      title: 'Periodic Sensor Calibration Due',
-      dept: 'Electrical & Computer Engineering',
-      resource: 'Keysight Oscilloscope (LAB-ECE-630)',
-      severity: 'Medium',
-      action: 'Notify Lab Manager'
-    },
-    {
-      id: 'al-2',
-      title: 'Inter-Departmental Escrow Settlement',
-      dept: 'Materials vs Biomedical',
-      resource: 'Monthly reciprocal credit balance clearance ($4,250)',
-      severity: 'Low',
-      action: 'Process Ledger'
+      if (orgsRes.data) setOrganizations(orgsRes.data as Organization[])
+      setTotalResources(resCountRes.count || 0)
+      setTotalUsers(usersCountRes.count || 0)
+      setTotalBookings(bookingsCountRes.count || 0)
+    } catch (err: unknown) {
+      console.error('Error fetching admin telemetry:', err)
+      setError('Could not query complete institutional telemetry from Supabase.')
+    } finally {
+      setLoading(false)
     }
-  ]
+  }
+
+  useEffect(() => {
+    loadAdminTelemetry()
+  }, [])
+
+  if (loading) {
+    return <LoadingSpinner fullPage label="Retrieving campus governance telemetry from Supabase..." />
+  }
 
   return (
     <div className="space-y-8">
-      {/* Visual disclaimer */}
-      <div className="bg-amber-50/80 border border-amber-200 rounded-xl p-3 flex items-start gap-2.5 text-xs text-amber-900">
-        <Info className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-        <p>
-          <strong>Campus Governance View:</strong> Administrative overview of institution-wide sharing metrics, department compliance scores, and audit flags.
-        </p>
-      </div>
-
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200">
         <div>
@@ -64,118 +67,115 @@ export const AdminDashboardPage: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            Central Research Oversight Office • Comprehensive campus telemetry and liability ledger
+            Central Research Oversight • Live PostgreSQL database telemetry and organizational compliance
           </p>
         </div>
 
-        <button
-          onClick={() => alert('Campus Audit Export is scheduled for periodic archiving.')}
-          className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold transition-colors self-start sm:self-auto"
-        >
-          <FileSpreadsheet className="w-4 h-4" />
-          <span>Export Audit Report</span>
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={loadAdminTelemetry}
+            className="p-2 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-500 transition-colors"
+            title="Refresh Database Telemetry"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
+        </div>
       </div>
 
-      {/* Admin Stats */}
+      {error && (
+        <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800 flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+          <p>{error}</p>
+        </div>
+      )}
+
+      {/* Live Admin Telemetry Stats */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {DEMO_ADMIN_STATS.map((stat, idx) => (
-          <StatCard
-            key={stat.label}
-            label={stat.label}
-            value={stat.value}
-            change={stat.change}
-            changeType={stat.changeType}
-            icon={statIcons[idx]}
-          />
-        ))}
+        <StatCard
+          label="Total Catalog Assets"
+          value={totalResources}
+          change="Across all labs"
+          changeType="positive"
+          icon={Server}
+        />
+        <StatCard
+          label="Institutional Members"
+          value={totalUsers}
+          change="Profiles registered"
+          changeType="positive"
+          icon={Users}
+        />
+        <StatCard
+          label="Cross-Dept Reservations"
+          value={totalBookings}
+          change="Total logged"
+          changeType="positive"
+          icon={Repeat}
+        />
+        <StatCard
+          label="Participating Institutions"
+          value={organizations.length}
+          change="Verified partners"
+          changeType="positive"
+          icon={TrendingUp}
+        />
       </div>
 
-      {/* Departmental Reciprocity & Governance Table */}
+      {/* Participating Institutions & Organizations Table */}
       <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4">
         <div className="flex items-center justify-between border-b border-slate-100 pb-3">
           <div>
-            <h2 className="text-base font-bold text-navy-950">Departmental Compliance & Utilization</h2>
-            <p className="text-xs text-slate-500">Cross-department equipment sharing and safety compliance ratings</p>
+            <h2 className="text-base font-bold text-navy-950">Participating Institutional Entities</h2>
+            <p className="text-xs text-slate-500">Live organization registry and verification status in Supabase</p>
           </div>
-          <span className="text-xs text-slate-500">6 Faculties Participating</span>
+          <span className="text-xs text-slate-500">{organizations.length} Organizations Enrolled</span>
         </div>
 
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200">
               <tr>
-                <th className="p-3">Department Name</th>
-                <th className="p-3">Cataloged Units</th>
-                <th className="p-3">Active Cross-Loans</th>
-                <th className="p-3">Safety & Trust Score</th>
-                <th className="p-3">Governance Status</th>
+                <th className="p-3">Organization Name</th>
+                <th className="p-3">Classification</th>
+                <th className="p-3">Campus Address / Location</th>
+                <th className="p-3">Verification Status</th>
+                <th className="p-3 text-right">Registered</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {departmentsData.map((d) => (
-                <tr key={d.name} className="hover:bg-slate-50/70 transition-colors">
+              {organizations.map((org) => (
+                <tr key={org.id} className="hover:bg-slate-50/70 transition-colors">
                   <td className="p-3 font-bold text-navy-950 flex items-center gap-2">
-                    <Building className="w-3.5 h-3.5 text-slate-400" />
-                    <span>{d.name}</span>
+                    <Building className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+                    <span>{org.name}</span>
                   </td>
-                  <td className="p-3 font-semibold text-slate-700">{d.assets} assets</td>
-                  <td className="p-3 font-semibold text-brand-600">{d.activeLoans} active</td>
-                  <td className="p-3 font-mono font-semibold text-navy-900">{d.trustScore}</td>
+                  <td className="p-3 capitalize font-medium text-slate-600">
+                    {org.organization_type.replace('_', ' ')}
+                  </td>
+                  <td className="p-3 text-slate-500 truncate max-w-xs">{org.address || 'Campus Network'}</td>
                   <td className="p-3">
                     <span
                       className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold ${
-                        d.status === 'Compliant'
+                        org.verification_status === 'verified'
                           ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                           : 'bg-amber-50 text-amber-700 border border-amber-200'
                       }`}
                     >
-                      {d.status === 'Compliant' ? (
+                      {org.verification_status === 'verified' ? (
                         <CheckCircle2 className="w-3 h-3 text-emerald-600" />
                       ) : (
                         <ShieldAlert className="w-3 h-3 text-amber-600" />
                       )}
-                      <span>{d.status}</span>
+                      <span className="capitalize">{org.verification_status}</span>
                     </span>
+                  </td>
+                  <td className="p-3 text-right text-slate-400 font-mono text-[11px]">
+                    {new Date(org.created_at).toLocaleDateString()}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
-      </div>
-
-      {/* Compliance & Audit Alerts */}
-      <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4">
-        <h2 className="text-base font-bold text-navy-950 flex items-center gap-2">
-          <ShieldAlert className="w-4 h-4 text-amber-600" />
-          <span>Operational Safety & Audit Flags</span>
-        </h2>
-
-        <div className="space-y-3">
-          {complianceAlerts.map((item) => (
-            <div
-              key={item.id}
-              className="p-4 rounded-xl border border-slate-200 bg-slate-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
-            >
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <span className="font-bold text-navy-950">{item.title}</span>
-                  <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-amber-100 text-amber-800 font-bold">
-                    {item.severity}
-                  </span>
-                </div>
-                <p className="text-slate-600">{item.dept} • {item.resource}</p>
-              </div>
-
-              <button
-                onClick={() => window.alert(`Triggered: ${item.action}`)}
-                className="px-3 py-1.5 bg-navy-900 hover:bg-navy-800 text-white rounded-lg text-xs font-semibold self-start sm:self-auto transition-colors"
-              >
-                {item.action}
-              </button>
-            </div>
-          ))}
         </div>
       </div>
     </div>

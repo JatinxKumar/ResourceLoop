@@ -1,25 +1,31 @@
-import React from 'react'
+import React, { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import {
   ArrowRight,
   ShieldCheck,
   Repeat,
-  Cpu,
   Microscope,
-  Box,
-  QrCode,
   FileCheck2,
   Lock,
   Building,
   TrendingDown,
   CheckCircle2,
-  Users
+  QrCode
 } from 'lucide-react'
-import { DEMO_RESOURCES } from '@/utils/ui-fixtures'
+import { getAvailableResources } from '@/hooks/useResources'
 import { ResourceCard } from '@/components/resources/ResourceCard'
+import type { Resource } from '@/types/domain'
 
 export const LandingPage: React.FC = () => {
-  const featuredResources = DEMO_RESOURCES.slice(0, 3)
+  const [featuredResources, setFeaturedResources] = useState<Resource[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    getAvailableResources()
+      .then((data) => setFeaturedResources(data.slice(0, 3)))
+      .catch(() => setFeaturedResources([]))
+      .finally(() => setLoading(false))
+  }, [])
 
   return (
     <div className="space-y-24 pb-20">
@@ -106,13 +112,13 @@ export const LandingPage: React.FC = () => {
                   </div>
                   <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-100">
                     <span className="text-xs text-slate-500">Shared Catalog</span>
-                    <div className="text-2xl font-bold text-navy-950 mt-1">486 Units</div>
-                    <span className="text-[11px] text-slate-500 font-medium">Across 18 Labs</span>
+                    <div className="text-2xl font-bold text-navy-950 mt-1">Live Database</div>
+                    <span className="text-[11px] text-slate-500 font-medium">Multi-Institutional</span>
                   </div>
                   <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-100">
-                    <span className="text-xs text-slate-500">Custody Dispute Rate</span>
-                    <div className="text-2xl font-bold text-navy-950 mt-1">0.02%</div>
-                    <span className="text-[11px] text-emerald-600 font-medium">QR Verified</span>
+                    <span className="text-xs text-slate-500">Custody Audit</span>
+                    <div className="text-2xl font-bold text-navy-950 mt-1">100%</div>
+                    <span className="text-[11px] text-emerald-600 font-medium">Verified Handoff</span>
                   </div>
                 </div>
 
@@ -253,16 +259,24 @@ export const LandingPage: React.FC = () => {
             to="/resources"
             className="inline-flex items-center gap-1.5 text-sm font-semibold text-brand-600 hover:text-brand-700 transition-colors"
           >
-            <span>View all 480+ catalog items</span>
+            <span>View all catalog items</span>
             <ArrowRight className="w-4 h-4" />
           </Link>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {featuredResources.map((resource) => (
-            <ResourceCard key={resource.id} resource={resource} />
-          ))}
-        </div>
+        {loading ? (
+          <div className="py-12 text-center text-xs text-slate-400">Loading catalog...</div>
+        ) : featuredResources.length > 0 ? (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {featuredResources.map((resource) => (
+              <ResourceCard key={resource.id} resource={resource} />
+            ))}
+          </div>
+        ) : (
+          <div className="p-8 bg-slate-50 border border-slate-200 rounded-xl text-center text-xs text-slate-500">
+            No resources cataloged yet. Lab owners can list apparatus from the Custodian Console.
+          </div>
+        )}
       </section>
 
       {/* Trust & Safety Section */}
@@ -312,13 +326,13 @@ export const LandingPage: React.FC = () => {
               to="/signup"
               className="px-6 py-3 bg-brand-600 hover:bg-brand-700 text-white font-semibold text-sm rounded-xl shadow-md transition-colors"
             >
-              Register with University Email
+              Register as Seeker
             </Link>
             <Link
-              to="/dashboard"
+              to="/resources"
               className="px-6 py-3 bg-slate-100 hover:bg-slate-200 text-navy-950 font-semibold text-sm rounded-xl transition-colors"
             >
-              Demo Seeker Experience
+              Browse Catalog
             </Link>
           </div>
         </div>
