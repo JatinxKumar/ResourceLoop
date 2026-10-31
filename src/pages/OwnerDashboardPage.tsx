@@ -119,7 +119,7 @@ export const OwnerDashboardPage: React.FC = () => {
     } finally {
       setLoading(false)
     }
-  }, [user, profile, organizationId])
+  }, [user, profile])
 
   useEffect(() => {
     loadOwnerData()
