@@ -93,8 +93,29 @@ BEGIN
            (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pgcrypto')
     INTO v_pgcrypto_installed, v_pgcrypto_schema;
 
-    RAISE NOTICE '[INFO] btree_gist installed: %, schema: %', v_btree_gist_installed, COALESCE(v_btree_gist_schema, 'not installed');
-    RAISE NOTICE '[INFO] pgcrypto installed: %, schema: %', v_pgcrypto_installed, COALESCE(v_pgcrypto_schema, 'not installed');
+    IF NOT v_btree_gist_installed THEN
+        v_can_proceed := false;
+        RAISE WARNING '[BLOCKER] Extension btree_gist is not installed.';
+        RAISE WARNING 'Action: Run CREATE EXTENSION btree_gist WITH SCHEMA extensions;';
+    ELSIF v_btree_gist_schema <> 'extensions' THEN
+        v_can_proceed := false;
+        RAISE WARNING '[BLOCKER] Extension btree_gist is installed in schema "%", but Migration 004 requires schema "extensions".', v_btree_gist_schema;
+        RAISE WARNING 'Action: Run ALTER EXTENSION btree_gist SET SCHEMA extensions; as superuser/postgres.';
+    ELSE
+        RAISE NOTICE '[OK] Check 4a: Extension btree_gist is installed in schema "extensions".';
+    END IF;
+
+    IF NOT v_pgcrypto_installed THEN
+        v_can_proceed := false;
+        RAISE WARNING '[BLOCKER] Extension pgcrypto is not installed.';
+        RAISE WARNING 'Action: Run CREATE EXTENSION pgcrypto WITH SCHEMA extensions;';
+    ELSIF v_pgcrypto_schema <> 'extensions' THEN
+        v_can_proceed := false;
+        RAISE WARNING '[BLOCKER] Extension pgcrypto is installed in schema "%", but Migration 004 requires schema "extensions".', v_pgcrypto_schema;
+        RAISE WARNING 'Action: Run ALTER EXTENSION pgcrypto SET SCHEMA extensions; as superuser/postgres.';
+    ELSE
+        RAISE NOTICE '[OK] Check 4b: Extension pgcrypto is installed in schema "extensions".';
+    END IF;
 
     -- --------------------------------------------------------------------------
     -- CHECK 5: Verify Row Level Security Activation
@@ -108,13 +129,13 @@ BEGIN
         v_bookings_rls_enabled, v_incidents_rls_enabled, v_notifications_rls_enabled, v_audit_logs_rls_enabled;
 
     -- --------------------------------------------------------------------------
-    -- CHECK 6: Donation Metadata Compatibility
+    -- CHECK 6: Donation Metadata Compatibility (Safe Parsing)
     -- --------------------------------------------------------------------------
     SELECT COUNT(*) INTO v_donation_resources_count
     FROM public.resources
-    WHERE (availability_info->>'is_donation')::boolean = true;
+    WHERE LOWER(TRIM(COALESCE(availability_info->>'is_donation', 'false'))) IN ('true', 't', '1', 'yes');
 
-    RAISE NOTICE '[INFO] Resource donation metadata compatibility verified. Active donation listings: %', v_donation_resources_count;
+    RAISE NOTICE '[OK] Check 6: Resource donation metadata compatibility verified. Active donation listings: %', v_donation_resources_count;
 
     -- --------------------------------------------------------------------------
     -- PREFLIGHT SUMMARY

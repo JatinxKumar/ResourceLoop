@@ -76,6 +76,33 @@ BEGIN
     END IF;
 END $$;
 
+-- Verify required extensions resolve under the 'extensions' schema.
+-- Prevents Migration 004 from proceeding into a broken state if pgcrypto or btree_gist
+-- remains in 'public' and cannot be accessed under the hardened SECURITY DEFINER search path.
+DO $$
+DECLARE
+    v_pgcrypto_schema TEXT;
+    v_btree_gist_schema TEXT;
+BEGIN
+    SELECT n.nspname INTO v_pgcrypto_schema
+    FROM pg_extension e JOIN pg_namespace n ON e.extnamespace = n.oid
+    WHERE e.extname = 'pgcrypto';
+
+    SELECT n.nspname INTO v_btree_gist_schema
+    FROM pg_extension e JOIN pg_namespace n ON e.extnamespace = n.oid
+    WHERE e.extname = 'btree_gist';
+
+    IF v_pgcrypto_schema IS NOT NULL AND v_pgcrypto_schema <> 'extensions' THEN
+        RAISE EXCEPTION 'CRITICAL EXTENSION SCHEMA MISMATCH: Extension pgcrypto is installed in schema "%", but Migration 004 requires schema "extensions". Please execute "ALTER EXTENSION pgcrypto SET SCHEMA extensions;" before applying Migration 004.', v_pgcrypto_schema
+        USING ERRCODE = '0A000';
+    END IF;
+
+    IF v_btree_gist_schema IS NOT NULL AND v_btree_gist_schema <> 'extensions' THEN
+        RAISE EXCEPTION 'CRITICAL EXTENSION SCHEMA MISMATCH: Extension btree_gist is installed in schema "%", but Migration 004 requires schema "extensions". Please execute "ALTER EXTENSION btree_gist SET SCHEMA extensions;" before applying Migration 004.', v_btree_gist_schema
+        USING ERRCODE = '0A000';
+    END IF;
+END $$;
+
 -- ------------------------------------------------------------------------------
 -- 2. SCHEMA ADDITIONS: public.bookings
 -- ------------------------------------------------------------------------------
@@ -1483,8 +1510,9 @@ BEGIN
     END IF;
 
     -- Donation metadata validation: verify resource is marked for donation or booking has [DONATION_CLAIM] marker
+    -- Safe text comparison prevents 22P02 invalid input syntax exceptions on malformed JSONB values
     IF NOT (
-        COALESCE((v_resource.availability_info->>'is_donation')::boolean, false) IS TRUE
+        LOWER(TRIM(COALESCE(v_resource.availability_info->>'is_donation', 'false'))) IN ('true', 't', '1', 'yes')
         OR v_booking.purpose LIKE '[DONATION_CLAIM]%'
     ) THEN
         RAISE EXCEPTION 'Validation error: Resource or reservation request is not designated as an institutional surplus donation'
