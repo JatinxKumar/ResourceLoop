@@ -35,6 +35,7 @@ export const CheckInOutPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null)
   const [errorKind, setErrorKind] = useState<'expired' | 'replay' | 'unauthorized' | 'invalid' | 'general'>('general')
   const [resultBookingId, setResultBookingId] = useState<string | null>(null)
+  const [incidentLogged, setIncidentLogged] = useState(false)
 
   // Condition report state (atomic with check-in/out)
   const [conditionStatus, setConditionStatus] = useState<ConditionStatus | ''>('')
@@ -153,15 +154,18 @@ export const CheckInOutPage: React.FC = () => {
       const rpc = mode === 'checkin' ? verifyCheckIn : verifyCheckOut
       const result = await rpc(
         scannedToken,
-        conditionStatus || undefined,
+        (conditionStatus as ConditionStatus) || undefined,
         conditionNotes.trim() || undefined
       )
       setResultBookingId(result.id)
+      setIncidentLogged(
+        mode === 'checkout' && (conditionStatus === 'damaged' || conditionStatus === 'faulty')
+      )
       setStep('confirmed')
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Verification failed.'
 
-      // Classify error for specific contract states: expired, replay, unauthorized, invalid
+      // Classify error for specific contract states: expired, replay, unauthorized, invalid, custody
       let displayError = msg
       let kind: 'expired' | 'replay' | 'unauthorized' | 'invalid' | 'general' = 'general'
 
@@ -171,9 +175,12 @@ export const CheckInOutPage: React.FC = () => {
       } else if (msg.includes('already') || msg.includes('replay') || msg.includes('used')) {
         kind = 'replay'
         displayError = 'This pass token has already been used. Each custody verification pass is strictly single-use to prevent replay.'
-      } else if (msg.includes('unauthorized') || msg.includes('Unauthorized') || msg.includes('permission') || msg.includes('forbidden')) {
+      } else if (msg.includes('unauthorized') || msg.includes('Unauthorized') || msg.includes('permission') || msg.includes('forbidden') || msg.includes('Custody')) {
         kind = 'unauthorized'
         displayError = 'You are not authorized to verify this booking. Only the resource owner or designated lab custodian may scan passes.'
+      } else if (msg.includes('Active custody conflict') || msg.includes('custody')) {
+        kind = 'general'
+        displayError = msg
       } else if (msg.includes('not found') || msg.includes('invalid') || msg.includes('Invalid')) {
         kind = 'invalid'
         displayError = 'Invalid or unrecognized pass token. Ensure the complete token was scanned or entered.'
@@ -196,6 +203,7 @@ export const CheckInOutPage: React.FC = () => {
     setError(null)
     setErrorKind('general')
     setResultBookingId(null)
+    setIncidentLogged(false)
     stopCamera()
   }
 
@@ -536,6 +544,17 @@ export const CheckInOutPage: React.FC = () => {
             <p className="text-[10px] font-mono text-slate-400 mb-5">
               Booking ID: {resultBookingId}
             </p>
+          )}
+          {incidentLogged && (
+            <div className="mb-5 p-3 rounded-lg bg-amber-50 border border-amber-200 text-left">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-800">
+                <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                <span>Incident Logged for Custodian Review</span>
+              </div>
+              <p className="text-[11px] text-amber-700 mt-1">
+                Asset returned with condition '{conditionStatus}'. An administrative review incident has been automatically opened.
+              </p>
+            </div>
           )}
           <button
             onClick={resetFlow}
