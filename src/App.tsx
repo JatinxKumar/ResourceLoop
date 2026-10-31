@@ -11,6 +11,7 @@ import { LoginPage } from '@/pages/LoginPage'
 import { SignupPage } from '@/pages/SignupPage'
 
 // Protected Application Pages
+import { DashboardPage } from '@/pages/DashboardPage'
 import { SeekerDashboardPage } from '@/pages/SeekerDashboardPage'
 import { ResourceDiscoveryPage } from '@/pages/ResourceDiscoveryPage'
 import { ResourceDetailPage } from '@/pages/ResourceDetailPage'
@@ -33,9 +34,18 @@ export const App: React.FC = () => {
 
           {/* Institutional Portal Routes Protected by Supabase Auth & Role-Gated */}
           <Route element={<DashboardLayout />}>
-            {/* Seeker / Common Authenticated Routes */}
+            {/* Unified Role-Aware Dashboard Router */}
             <Route
               path="/dashboard"
+              element={
+                <ProtectedRoute allowedRoles={['seeker', 'owner', 'admin']}>
+                  <DashboardPage />
+                </ProtectedRoute>
+              }
+            />
+            {/* Direct Seeker Console View */}
+            <Route
+              path="/seeker"
               element={
                 <ProtectedRoute allowedRoles={['seeker', 'owner', 'admin']}>
                   <SeekerDashboardPage />

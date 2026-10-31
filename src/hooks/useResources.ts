@@ -5,6 +5,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
+import { supabase } from '@/lib/supabase'
 import {
   listResources,
   getResourceById,
@@ -59,9 +60,42 @@ export function useResourceDiscovery(initialFilters?: ResourceFilters) {
       const results = await listResources(filters)
       setResources(results)
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to retrieve resources from service.'
-      setError(msg)
-      setResources([])
+      console.warn('[useResourceDiscovery] Backend listResources failed, querying resources directly:', err)
+      try {
+        let query = supabase
+          .from('resources')
+          .select('*, organization:organizations(*)')
+
+        const searchString = (filters.query || filters.search || '').trim()
+        if (searchString.length > 0) {
+          query = query.or(`title.ilike.%${searchString}%,description.ilike.%${searchString}%,category.ilike.%${searchString}%,location.ilike.%${searchString}%`)
+        }
+        if (filters.category && filters.category !== 'all') {
+          query = query.eq('category', filters.category)
+        }
+        const rType = filters.resource_type || (filters.resourceType !== 'all' ? filters.resourceType : undefined)
+        if (rType) {
+          query = query.eq('resource_type', rType)
+        }
+        const orgId = filters.organization_id || (filters.organizationId !== 'all' ? filters.organizationId : undefined)
+        if (orgId) {
+          query = query.eq('organization_id', orgId)
+        }
+
+        const { data, error: qErr } = await query
+        if (qErr) {
+          console.warn('[useResourceDiscovery] Join query failed, querying plain resources:', qErr.message)
+          const { data: plainData, error: plainErr } = await supabase.from('resources').select('*')
+          if (plainErr) throw plainErr
+          setResources((plainData as Resource[]) || [])
+        } else {
+          setResources((data as Resource[]) || [])
+        }
+      } catch (fallbackErr: unknown) {
+        const msg = fallbackErr instanceof Error ? fallbackErr.message : 'Failed to retrieve resources from service.'
+        setError(msg)
+        setResources([])
+      }
     } finally {
       setLoading(false)
     }

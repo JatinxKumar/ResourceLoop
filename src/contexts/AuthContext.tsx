@@ -15,6 +15,7 @@ interface AuthContextType {
   signup: (email: string, password: string, fullName: string) => Promise<{ error: Error | null; user?: User | null }>
   logout: () => Promise<void>
   refreshSession: () => Promise<void>
+  refreshProfile: () => Promise<Profile | null>
   clearError: () => void
 }
 
@@ -28,20 +29,67 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const clearError = () => setError(null)
 
-  // Fetch full profile delegating to the backend profile service
+  // Fetch full profile delegating to the backend profile service, with resilient RPC role resolution
   const fetchProfile = useCallback(async (): Promise<Profile | null> => {
-    try {
-      const data = await getCurrentProfile()
-      if (data) {
-        setProfile(data)
-        return data
-      }
-      return null
-    } catch (err: unknown) {
-      console.error('Unexpected error fetching profile via service:', err)
+    let resolvedUser = user
+    if (!resolvedUser) {
+      const { data: { user: sessionUser } } = await supabase.auth.getUser()
+      resolvedUser = sessionUser
+    }
+
+    if (!resolvedUser) {
+      setProfile(null)
       return null
     }
-  }, [])
+
+    try {
+      const data = await getCurrentProfile()
+      if (data && data.role) {
+        setProfile(data)
+        setError(null)
+        return data
+      }
+    } catch (err: unknown) {
+      console.warn('[AuthContext] Backend getCurrentProfile failed, querying database role via RPC:', err)
+    }
+
+    // Direct database role resolution using security definer RPC (bypasses RLS recursion on profiles)
+    try {
+      const { data: rpcRole, error: rpcError } = await supabase.rpc('get_user_role')
+      if (rpcError) {
+        console.error('[AuthContext] RPC get_user_role failed:', rpcError.message)
+        setError(`Failed to retrieve profile role: ${rpcError.message}`)
+        setProfile(null)
+        return null
+      }
+
+      if (rpcRole && (rpcRole === 'owner' || rpcRole === 'admin' || rpcRole === 'seeker')) {
+        const resolvedRole = rpcRole as UserRole
+        const resolvedProfile: Profile = {
+          id: resolvedUser.id,
+          full_name: resolvedUser.user_metadata?.full_name || resolvedUser.email?.split('@')[0] || 'Institutional User',
+          email: resolvedUser.email || '',
+          role: resolvedRole,
+          organization_id: resolvedUser.user_metadata?.organization_id || undefined,
+          avatar_url: resolvedUser.user_metadata?.avatar_url || null,
+          created_at: resolvedUser.created_at || new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        }
+        setProfile(resolvedProfile)
+        setError(null)
+        return resolvedProfile
+      } else {
+        setError(`Unrecognized role "${rpcRole}" returned from database.`)
+        setProfile(null)
+        return null
+      }
+    } catch (fallbackErr: unknown) {
+      console.error('[AuthContext] Profile resolution failed:', fallbackErr)
+      setError(fallbackErr instanceof Error ? fallbackErr.message : 'Failed to resolve database profile')
+      setProfile(null)
+      return null
+    }
+  }, [user])
 
   // Initialize auth session on mount
   useEffect(() => {
@@ -209,6 +257,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         signup,
         logout,
         refreshSession,
+        refreshProfile: fetchProfile,
         clearError
       }}
     >
