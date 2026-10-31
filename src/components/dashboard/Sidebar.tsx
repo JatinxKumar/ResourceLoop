@@ -8,15 +8,14 @@ import {
   Building2,
   ShieldCheck,
   BarChart3,
-  SlidersHorizontal,
   LogOut,
-  HelpCircle,
-  ExternalLink
+  ExternalLink,
+  Lock
 } from 'lucide-react'
 import { useAuth } from '@/contexts/AuthContext'
 
 export const Sidebar: React.FC = () => {
-  const { role, user, logout } = useAuth()
+  const { role, profile, logout } = useAuth()
 
   const mainNav = [
     { name: 'Seeker Overview', href: '/dashboard', icon: LayoutDashboard },
@@ -25,10 +24,8 @@ export const Sidebar: React.FC = () => {
     { name: 'Impact & CapEx', href: '/impact', icon: BarChart3 },
   ]
 
-  const roleNav = [
-    { name: 'Lab Custodian Portal', href: '/owner', icon: Building2, tag: 'Owner' },
-    { name: 'Campus Governance', href: '/admin', icon: ShieldCheck, tag: 'Admin' },
-  ]
+  const isOwnerOrAdmin = role === 'owner' || role === 'admin'
+  const isAdmin = role === 'admin'
 
   return (
     <aside className="w-64 bg-navy-950 text-slate-300 flex flex-col flex-shrink-0 h-screen sticky top-0 border-r border-navy-900 select-none">
@@ -78,35 +75,63 @@ export const Sidebar: React.FC = () => {
           </nav>
         </div>
 
+        {/* Management Consoles (Role-Gated) */}
         <div>
           <p className="px-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">
             Management Consoles
           </p>
           <nav className="space-y-1">
-            {roleNav.map((item) => {
-              const Icon = item.icon
-              return (
-                <NavLink
-                  key={item.name}
-                  to={item.href}
-                  className={({ isActive }) =>
-                    `flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all ${
-                      isActive
-                        ? 'bg-brand-600/20 text-brand-300 font-semibold border-l-2 border-brand-500 rounded-l-none'
-                        : 'text-slate-400 hover:text-white hover:bg-navy-900/60'
-                    }`
-                  }
-                >
-                  <div className="flex items-center gap-3">
-                    <Icon className="w-4 h-4 flex-shrink-0" />
-                    <span>{item.name}</span>
-                  </div>
-                  <span className="text-[10px] font-mono bg-navy-900 text-slate-400 px-1.5 py-0.5 rounded border border-navy-800">
-                    {item.tag}
-                  </span>
-                </NavLink>
-              )
-            })}
+            {isOwnerOrAdmin ? (
+              <NavLink
+                to="/owner"
+                className={({ isActive }) =>
+                  `flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all ${
+                    isActive
+                      ? 'bg-brand-600/20 text-brand-300 font-semibold border-l-2 border-brand-500 rounded-l-none'
+                      : 'text-slate-400 hover:text-white hover:bg-navy-900/60'
+                  }`
+                }
+              >
+                <div className="flex items-center gap-3">
+                  <Building2 className="w-4 h-4 flex-shrink-0" />
+                  <span>Custodian Console</span>
+                </div>
+                <span className="text-[10px] font-mono bg-navy-900 text-brand-400 px-1.5 py-0.5 rounded border border-navy-800">
+                  Owner
+                </span>
+              </NavLink>
+            ) : null}
+
+            {isAdmin ? (
+              <NavLink
+                to="/admin"
+                className={({ isActive }) =>
+                  `flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all ${
+                    isActive
+                      ? 'bg-brand-600/20 text-brand-300 font-semibold border-l-2 border-brand-500 rounded-l-none'
+                      : 'text-slate-400 hover:text-white hover:bg-navy-900/60'
+                  }`
+                }
+              >
+                <div className="flex items-center gap-3">
+                  <ShieldCheck className="w-4 h-4 flex-shrink-0" />
+                  <span>Campus Governance</span>
+                </div>
+                <span className="text-[10px] font-mono bg-navy-900 text-slate-400 px-1.5 py-0.5 rounded border border-navy-800">
+                  Admin
+                </span>
+              </NavLink>
+            ) : null}
+
+            {!isOwnerOrAdmin && (
+              <div className="px-3 py-2 rounded-lg text-xs text-slate-400 flex items-center justify-between bg-navy-900/30 border border-navy-900/40">
+                <div className="flex items-center gap-2">
+                  <Lock className="w-3.5 h-3.5" />
+                  <span>Custodian Console</span>
+                </div>
+                <span className="text-[9px] uppercase tracking-wider">Owner Only</span>
+              </div>
+            )}
           </nav>
         </div>
       </div>
@@ -116,10 +141,10 @@ export const Sidebar: React.FC = () => {
         <div className="bg-navy-900/90 rounded-xl p-3 border border-navy-800">
           <div className="flex items-center gap-2 text-xs font-semibold text-emerald-400">
             <ShieldCheck className="w-4 h-4" />
-            <span>Campus Trust Verified</span>
+            <span>Database Connected</span>
           </div>
-          <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
-            Institutional Escrow & QR Audit Log Active
+          <p className="text-[11px] text-slate-400 mt-1 leading-relaxed truncate">
+            {profile?.organization?.name || 'Academic Network Member'}
           </p>
         </div>
 
@@ -129,7 +154,7 @@ export const Sidebar: React.FC = () => {
             <ExternalLink className="w-3 h-3" />
           </Link>
           <button
-            onClick={logout}
+            onClick={() => logout()}
             className="hover:text-rose-400 flex items-center gap-1 text-slate-400 transition-colors"
           >
             <LogOut className="w-3.5 h-3.5" />

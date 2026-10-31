@@ -1,4 +1,5 @@
-import { useAuth, UserRole } from '@/contexts/AuthContext'
+import { useAuth } from '@/contexts/AuthContext'
+import type { UserRole } from '@/types/domain'
 
 export interface RolePermissions {
   canBrowse: boolean
@@ -9,11 +10,11 @@ export interface RolePermissions {
 }
 
 export const useRole = () => {
-  const { role, user, setRole } = useAuth()
+  const { role, profile, user, isAuthenticated, loading } = useAuth()
 
   const permissions: RolePermissions = {
     canBrowse: true,
-    canRequest: role === 'seeker' || role === 'owner',
+    canRequest: role === 'seeker' || role === 'owner' || role === 'admin',
     canApprove: role === 'owner' || role === 'admin',
     canManageAssets: role === 'owner' || role === 'admin',
     canAuditCampus: role === 'admin'
@@ -21,8 +22,10 @@ export const useRole = () => {
 
   return {
     role,
+    profile,
     user,
-    setRole,
+    isAuthenticated,
+    loading,
     permissions,
     isSeeker: role === 'seeker',
     isOwner: role === 'owner',

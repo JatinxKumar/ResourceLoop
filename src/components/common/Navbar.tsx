@@ -6,7 +6,7 @@ import { useAuth } from '@/contexts/AuthContext'
 export const Navbar: React.FC = () => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const location = useLocation()
-  const { isAuthenticated, user, role } = useAuth()
+  const { isAuthenticated, user, profile, role } = useAuth()
 
   const navLinks = [
     { name: 'Discover Resources', href: '/resources' },
@@ -20,6 +20,8 @@ export const Navbar: React.FC = () => {
     if (role === 'admin') return '/admin'
     return '/dashboard'
   }
+
+  const displayName = profile?.full_name?.split(' ')[0] || user?.email?.split('@')[0] || 'Portal'
 
   return (
     <header className="sticky top-0 z-40 bg-white/90 backdrop-blur-md border-b border-slate-200">
@@ -72,7 +74,7 @@ export const Navbar: React.FC = () => {
                 to={getDashboardPath()}
                 className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-navy-900 hover:bg-navy-800 rounded-lg shadow-sm transition-all focus:outline-none focus:ring-2 focus:ring-navy-900 focus:ring-offset-2"
               >
-                <span>Enter Portal ({user?.name.split(' ')[0]})</span>
+                <span>Enter Portal ({displayName})</span>
                 <ArrowRight className="w-4 h-4 text-brand-400" />
               </Link>
             ) : (
@@ -121,20 +123,32 @@ export const Navbar: React.FC = () => {
             </Link>
           ))}
           <div className="pt-3 border-t border-slate-100 flex flex-col gap-2">
-            <Link
-              to="/login"
-              onClick={() => setMobileMenuOpen(false)}
-              className="w-full text-center px-4 py-2 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg"
-            >
-              Institutional Sign In
-            </Link>
-            <Link
-              to="/dashboard"
-              onClick={() => setMobileMenuOpen(false)}
-              className="w-full text-center px-4 py-2 text-sm font-semibold text-white bg-navy-900 hover:bg-navy-800 rounded-lg"
-            >
-              Access Resource Portal
-            </Link>
+            {isAuthenticated ? (
+              <Link
+                to={getDashboardPath()}
+                onClick={() => setMobileMenuOpen(false)}
+                className="w-full text-center px-4 py-2 text-sm font-semibold text-white bg-navy-900 hover:bg-navy-800 rounded-lg"
+              >
+                Enter Portal ({displayName})
+              </Link>
+            ) : (
+              <>
+                <Link
+                  to="/login"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="w-full text-center px-4 py-2 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg"
+                >
+                  Institutional Sign In
+                </Link>
+                <Link
+                  to="/signup"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="w-full text-center px-4 py-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-lg"
+                >
+                  Join Network as Seeker
+                </Link>
+              </>
+            )}
           </div>
         </div>
       )}

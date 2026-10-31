@@ -1,12 +1,12 @@
 import React from 'react'
 import { Link } from 'react-router-dom'
-import { Calendar, QrCode, ShieldAlert, CheckCircle, Clock, ExternalLink } from 'lucide-react'
-import { UIBooking } from '@/utils/ui-fixtures'
+import { Calendar, QrCode, CheckCircle, Clock, ExternalLink, XCircle } from 'lucide-react'
+import type { Booking } from '@/types/domain'
 import { StatusBadge } from '@/components/common/StatusBadge'
 
 interface BookingCardProps {
-  booking: UIBooking
-  onViewPass?: (booking: UIBooking) => void
+  booking: Booking
+  onViewPass?: (booking: Booking) => void
   onCancel?: (id: string) => void
 }
 
@@ -15,20 +15,39 @@ export const BookingCard: React.FC<BookingCardProps> = ({
   onViewPass,
   onCancel
 }) => {
+  const resourceTitle = booking.resource?.title || 'Institutional Resource'
+  const resourceCategory = booking.resource?.category || 'Equipment'
+  const formattedStart = new Date(booking.start_time).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
+  const formattedEnd = new Date(booking.end_time).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
+
+  const isApproved = booking.status === 'approved' || booking.status === 'checked_in'
+
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-card hover:shadow-card-hover transition-all">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
         <div>
           <div className="flex items-center gap-2">
-            <span className="font-mono text-xs font-semibold text-slate-500">{booking.checkInCode}</span>
+            <span className="font-mono text-xs font-semibold text-slate-500">
+              ID: {booking.id.substring(0, 8)}
+            </span>
             <span className="text-slate-300">•</span>
             <span className="text-xs text-brand-700 font-medium bg-brand-50 px-2 py-0.5 rounded">
-              {booking.resourceCategory}
+              {resourceCategory}
             </span>
           </div>
           <h3 className="text-base font-bold text-navy-950 mt-1">
-            <Link to={`/resources/${booking.resourceId}`} className="hover:text-brand-600 transition-colors">
-              {booking.resourceTitle}
+            <Link to={`/resources/${booking.resource_id}`} className="hover:text-brand-600 transition-colors">
+              {resourceTitle}
             </Link>
           </h3>
         </div>
@@ -42,19 +61,24 @@ export const BookingCard: React.FC<BookingCardProps> = ({
         <div className="flex items-center gap-2">
           <Calendar className="w-4 h-4 text-slate-400" />
           <span>
-            <strong>Reservation:</strong> {booking.startDate} → {booking.endDate}
+            <strong>Schedule:</strong> {formattedStart} → {formattedEnd}
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {booking.supervisorApproval ? (
+          {booking.status === 'approved' || booking.status === 'checked_in' ? (
             <span className="inline-flex items-center gap-1.5 text-emerald-700 font-medium">
               <CheckCircle className="w-4 h-4 text-emerald-600" />
-              Supervisor Pre-Approval Granted
+              Custodian Authorization Granted
+            </span>
+          ) : booking.status === 'rejected' ? (
+            <span className="inline-flex items-center gap-1.5 text-rose-700 font-medium">
+              <XCircle className="w-4 h-4 text-rose-600" />
+              Request Declined {booking.rejection_reason ? `(${booking.rejection_reason})` : ''}
             </span>
           ) : (
             <span className="inline-flex items-center gap-1.5 text-amber-700 font-medium">
               <Clock className="w-4 h-4 text-amber-500" />
-              Department Approval Pending
+              Pending Custodian Authorization
             </span>
           )}
         </div>
@@ -67,15 +91,15 @@ export const BookingCard: React.FC<BookingCardProps> = ({
       {/* Footer Actions */}
       <div className="pt-2 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100">
         <Link
-          to={`/resources/${booking.resourceId}`}
+          to={`/resources/${booking.resource_id}`}
           className="text-xs font-medium text-slate-600 hover:text-navy-900 inline-flex items-center gap-1"
         >
-          <span>Resource Specs</span>
+          <span>Resource Specifications</span>
           <ExternalLink className="w-3.5 h-3.5" />
         </Link>
 
         <div className="flex items-center gap-2">
-          {onViewPass && (
+          {isApproved && onViewPass && (
             <button
               onClick={() => onViewPass(booking)}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-navy-900 hover:bg-navy-800 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors"
