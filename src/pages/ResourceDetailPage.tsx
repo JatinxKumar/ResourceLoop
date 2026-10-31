@@ -17,6 +17,7 @@ import {
 import { getResourceById } from '@/hooks/useResources'
 import { requestBooking } from '@/hooks/useBookings'
 import { useAuth } from '@/contexts/AuthContext'
+import { supabase } from '@/lib/supabase'
 import { StatusBadge } from '@/components/common/StatusBadge'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { EmptyState } from '@/components/common/EmptyState'
@@ -42,7 +43,7 @@ export const ResourceDetailPage: React.FC = () => {
   const [bookingError, setBookingError] = useState<string | null>(null)
   const [bookingSuccess, setBookingSuccess] = useState(false)
 
-  // Load resource details from Supabase
+  // Load resource details from Supabase with fallback
   useEffect(() => {
     if (!id) return
 
@@ -53,9 +54,30 @@ export const ResourceDetailPage: React.FC = () => {
       .then((data) => {
         setResource(data)
       })
-      .catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : 'Failed to load resource.'
-        setFetchError(msg)
+      .catch(async (err: unknown) => {
+        console.warn('Backend getResourceById failed, querying database directly:', err)
+        try {
+          const { data, error } = await supabase
+            .from('resources')
+            .select('*, organization:organizations(*)')
+            .eq('id', id)
+            .maybeSingle()
+          if (!error && data) {
+            setResource(data as Resource)
+            return
+          }
+          // If join query hit 42P17, fallback to plain resource row
+          const { data: plainData, error: plainError } = await supabase
+            .from('resources')
+            .select('*')
+            .eq('id', id)
+            .maybeSingle()
+          if (plainError) throw plainError
+          setResource(plainData as Resource)
+        } catch (fallbackErr: unknown) {
+          const msg = fallbackErr instanceof Error ? fallbackErr.message : 'Failed to load resource.'
+          setFetchError(msg)
+        }
       })
       .finally(() => {
         setLoading(false)

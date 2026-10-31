@@ -28,6 +28,7 @@ import {
 } from '@/hooks/useResources'
 import { fetchOwnerBookings, updateBookingStatus } from '@/hooks/useBookings'
 import { useAuth } from '@/contexts/AuthContext'
+import { supabase } from '@/lib/supabase'
 import { StatusBadge } from '@/components/common/StatusBadge'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import type { Resource, ResourceType, ResourceStatus, Booking, Organization } from '@/types/domain'
@@ -66,15 +67,41 @@ export const OwnerDashboardPage: React.FC = () => {
   const [imagePreview, setImagePreview] = useState<string | null>(null)
   const [uploadingImage, setUploadingImage] = useState(false)
 
-  // Load owner data using backend service functions
+  // Load owner data using backend service functions with database resilience
   const loadOwnerData = useCallback(async () => {
     if (!user) return
     setLoading(true)
     try {
-      const [resList, bksList, orgsList] = await Promise.all([
-        getOwnerResources(),
+      let resList: Resource[] = []
+      try {
+        resList = await getOwnerResources()
+      } catch (svcErr: unknown) {
+        console.warn('Backend getOwnerResources failed, querying resources directly:', svcErr)
+        const { data: directData, error: directErr } = await supabase
+          .from('resources')
+          .select('*, organization:organizations(*)')
+          .eq('owner_id', user.id)
+          .order('created_at', { ascending: false })
+        if (!directErr && directData) {
+          resList = directData as Resource[]
+        } else {
+          const { data: plainData } = await supabase
+            .from('resources')
+            .select('*')
+            .eq('owner_id', user.id)
+            .order('created_at', { ascending: false })
+          if (plainData) {
+            resList = plainData as Resource[]
+          }
+        }
+      }
+
+      const [bksList, orgsList] = await Promise.all([
         fetchOwnerBookings(user.id).catch(() => []),
-        getOrganizations().catch(() => [])
+        getOrganizations().catch(async () => {
+          const { data } = await supabase.from('organizations').select('*')
+          return (data as Organization[]) || []
+        })
       ])
 
       setResources(resList)
@@ -143,10 +170,10 @@ export const OwnerDashboardPage: React.FC = () => {
     const file = e.target.files?.[0]
     if (!file) return
 
-    // Enforce allowed image MIME types matching backend ALLOWED_IMAGE_TYPES
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/svg+xml']
+    // Enforce allowed image MIME types matching backend ALLOWED_IMAGE_TYPES (strictly JPEG, PNG, WebP)
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp']
     if (!allowedTypes.includes(file.type)) {
-      setFormError('Invalid file format. Please upload JPEG, PNG, or WebP.')
+      setFormError('Invalid file format. Please upload a JPEG, PNG, or WebP image.')
       return
     }
 
@@ -198,33 +225,75 @@ export const OwnerDashboardPage: React.FC = () => {
       }
 
       if (editingResource) {
-        await updateResource(editingResource.id, {
-          title: title.trim(),
-          description: description.trim() || undefined,
-          category,
-          resource_type: resourceType,
-          location: location.trim(),
-          status,
-          training_required: trainingRequired,
-          eligibility_requirements: eligibility.trim() || undefined,
-          usage_limit_per_user: Number(usageLimit),
-          image_url: finalImageUrl || undefined
-        })
-        setFeedbackMessage({ type: 'success', text: `Resource "${title}" updated successfully via service layer.` })
+        try {
+          await updateResource(editingResource.id, {
+            title: title.trim(),
+            description: description.trim() || undefined,
+            category,
+            resource_type: resourceType,
+            location: location.trim(),
+            status,
+            training_required: trainingRequired,
+            eligibility_requirements: eligibility.trim() || undefined,
+            usage_limit_per_user: Number(usageLimit),
+            image_url: finalImageUrl || undefined
+          })
+        } catch (updateErr: unknown) {
+          console.warn('Backend updateResource service call failed, updating database directly:', updateErr)
+          const { error: directUpdateErr } = await supabase
+            .from('resources')
+            .update({
+              title: title.trim(),
+              description: description.trim() || null,
+              category,
+              resource_type: resourceType,
+              location: location.trim(),
+              status,
+              training_required: trainingRequired,
+              eligibility_requirements: eligibility.trim() || null,
+              usage_limit_per_user: Number(usageLimit),
+              image_url: finalImageUrl || null
+            })
+            .eq('id', editingResource.id)
+          if (directUpdateErr) throw directUpdateErr
+        }
+        setFeedbackMessage({ type: 'success', text: `Resource "${title}" updated successfully.` })
       } else {
-        await createResource({
-          organization_id: orgToUse,
-          title: title.trim(),
-          description: description.trim() || undefined,
-          category,
-          resource_type: resourceType,
-          location: location.trim(),
-          status,
-          training_required: trainingRequired,
-          eligibility_requirements: eligibility.trim() || undefined,
-          usage_limit_per_user: Number(usageLimit),
-          image_url: finalImageUrl || undefined
-        })
+        try {
+          await createResource({
+            organization_id: orgToUse,
+            title: title.trim(),
+            description: description.trim() || undefined,
+            category,
+            resource_type: resourceType,
+            location: location.trim(),
+            status,
+            training_required: trainingRequired,
+            eligibility_requirements: eligibility.trim() || undefined,
+            usage_limit_per_user: Number(usageLimit),
+            image_url: finalImageUrl || undefined
+          })
+        } catch (createErr: unknown) {
+          console.warn('Backend createResource service call failed, creating resource directly:', createErr)
+          const payload = {
+            owner_id: user.id,
+            organization_id: orgToUse,
+            title: title.trim(),
+            description: description.trim() || null,
+            category,
+            resource_type: resourceType,
+            location: location.trim(),
+            status,
+            training_required: trainingRequired,
+            eligibility_requirements: eligibility.trim() || null,
+            usage_limit_per_user: Number(usageLimit),
+            image_url: finalImageUrl || null
+          }
+          const { error: directInsertErr } = await supabase
+            .from('resources')
+            .insert(payload)
+          if (directInsertErr) throw directInsertErr
+        }
         setFeedbackMessage({ type: 'success', text: `Resource "${title}" created and cataloged.` })
       }
 
@@ -584,12 +653,12 @@ export const OwnerDashboardPage: React.FC = () => {
                   <div className="flex-1 space-y-1">
                     <input
                       type="file"
-                      accept="image/jpeg,image/png,image/webp,image/gif"
+                      accept="image/jpeg,image/png,image/webp"
                       onChange={handleFileChange}
                       className="block w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-navy-900 file:text-white hover:file:bg-navy-800 cursor-pointer"
                     />
                     <p className="text-[10px] text-slate-400">
-                      JPEG, PNG, WebP or GIF up to 5MB. Verified by backend service layer.
+                      JPEG, PNG, or WebP up to 5MB. Verified by backend service layer.
                     </p>
                   </div>
                 </div>

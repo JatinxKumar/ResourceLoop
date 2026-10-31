@@ -17,15 +17,19 @@ import { useAuth } from '@/contexts/AuthContext'
 export const Sidebar: React.FC = () => {
   const { role, profile, logout } = useAuth()
 
+  const isOwnerOrAdmin = role === 'owner' || role === 'admin'
+  const isAdmin = role === 'admin'
+  const isOwner = role === 'owner'
+
+  const overviewName = isOwner ? 'Custodian Overview' : isAdmin ? 'Campus Governance' : 'Seeker Overview'
+  const overviewHref = isOwner ? '/owner' : isAdmin ? '/admin' : '/dashboard'
+
   const mainNav = [
-    { name: 'Seeker Overview', href: '/dashboard', icon: LayoutDashboard },
+    { name: overviewName, href: overviewHref, icon: LayoutDashboard },
     { name: 'Browse Catalog', href: '/resources', icon: Search },
     { name: 'My Bookings', href: '/bookings', icon: CalendarCheck },
     { name: 'Impact & CapEx', href: '/impact', icon: BarChart3 },
   ]
-
-  const isOwnerOrAdmin = role === 'owner' || role === 'admin'
-  const isAdmin = role === 'admin'
 
   return (
     <aside className="w-64 bg-navy-950 text-slate-300 flex flex-col flex-shrink-0 h-screen sticky top-0 border-r border-navy-900 select-none">
