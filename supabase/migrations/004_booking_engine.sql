@@ -11,27 +11,60 @@
 --    SET search_path = pg_catalog, extensions, pg_temp;
 --    (public is excluded from search_path; all application tables, types, and
 --    functions are explicitly schema-qualified as public.* to prevent search-path hijacking).
--- 3. Scheduled Overlap Prevention: Safe check of existing data before adding the
+--    Extension functions (gen_random_bytes, digest, encode) are explicitly resolved
+--    under the extensions schema.
+-- 3. Extension Management: Ensures extensions schema exists, installs btree_gist
+--    and pgcrypto in extensions schema, and relocates any legacy public installations.
+-- 4. Scheduled Overlap Prevention: Safe check of existing data before adding the
 --    no_overlapping_scheduled_bookings exclusion constraint (no unconditional drops).
--- 4. Active Custody Protection: Shared resource-level transaction lock
+-- 5. Active Custody Protection: Shared resource-level transaction lock
 --    (pg_advisory_xact_lock on resource_custody) acquired before evaluating custody.
---    Custody state is rechecked after acquiring lock in both approve_booking() and verify_check_in().
--- 5. Precise Overdue Custody Rule: Approvals are blocked if the asset currently has an
---    unreturned 'overdue' booking and candidate start_time is within 24 hours of now(),
---    or if an active 'checked_in' session's scheduled end has not yet elapsed.
--- 6. Deterministic FIFO Waitlist: Evaluated per resource and overlapping time window
---    using interval intersection (&&) with transactional serialization and queue compaction.
--- 7. Seeker-Only QR Pass Generation: generate_booking_pass() strictly restricts token
---    generation to the booking requester (auth.uid() = requester_id).
--- 8. Audit Logging & Human Governance: Full audit trail matching public.audit_logs.
+--    An unreturned 'checked_in' or 'overdue' booking strictly blocks new approvals
+--    and check-ins until physical checkout is completed, even if scheduled end time has passed.
+-- 6. Deterministic Connected-Cluster FIFO Waitlist: Evaluated per resource across
+--    connected overlapping interval chains. Requests in connected clusters receive
+--    strictly sequential, deterministic FIFO positions (1, 2, 3...) ordered by
+--    (created_at ASC, id ASC). Independent intervals maintain isolated queues.
+--    FIFO priority is strictly enforced on approval: earlier waitlisted requests
+--    cannot be bypassed.
+-- 7. Shared Custody Lock in Maintenance: mark_overdue_bookings() acquires the shared
+--    resource-custody advisory lock and rechecks status under lock.
+-- 8. Seeker-Only QR Pass Generation: generate_booking_pass() strictly restricts token
+--    generation to the booking requester (auth.uid() = requester_id). Returns symmetric
+--    token and raw_token payload with ISO expiration.
+-- 9. Complete Verification Return Contract: verify_check_in() and verify_check_out()
+--    return the full public.bookings row with parameter names matching the frontend DTO.
+-- 10. Audit Logging & Human Governance: Full audit trail matching public.audit_logs.
 --    Automatic damage incident flagging with human-only resolution and penalty review.
 -- ==============================================================================
 
 -- ------------------------------------------------------------------------------
--- 1. EXTENSIONS
+-- 1. EXTENSIONS & SCHEMA QUALIFICATION
 -- ------------------------------------------------------------------------------
-CREATE EXTENSION IF NOT EXISTS btree_gist;
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE SCHEMA IF NOT EXISTS extensions;
+
+CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+
+-- Safely relocate pgcrypto or btree_gist if installed in public by earlier scripts
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_extension e
+        JOIN pg_namespace n ON e.extnamespace = n.oid
+        WHERE e.extname = 'pgcrypto' AND n.nspname = 'public'
+    ) THEN
+        ALTER EXTENSION pgcrypto SET SCHEMA extensions;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM pg_extension e
+        JOIN pg_namespace n ON e.extnamespace = n.oid
+        WHERE e.extname = 'btree_gist' AND n.nspname = 'public'
+    ) THEN
+        ALTER EXTENSION btree_gist SET SCHEMA extensions;
+    END IF;
+END $$;
 
 -- ------------------------------------------------------------------------------
 -- 2. SCHEMA ADDITIONS: public.bookings
@@ -122,9 +155,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.booking_access_tokens TO service_
 
 -- ------------------------------------------------------------------------------
 -- 4. HELPER: recalculate_waitlist
--- Re-evaluates queue position per resource and overlapping time window cluster.
--- Uses exact same FIFO semantics as waitlist_booking():
--- position = 1 + count of prior overlapping waitlisted requests.
+-- Evaluates deterministic queue positions per resource using Connected Interval
+-- Cluster Semantics.
+-- Chained overlapping intervals (A overlaps B, B overlaps C) form connected clusters
+-- and receive strictly sequential FIFO positions (1, 2, 3...) ordered by (created_at ASC, id ASC).
+-- Independent non-overlapping intervals maintain isolated queues starting at 1.
 -- Restricted to internal execution (service_role / postgres only).
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.recalculate_waitlist(p_resource_id UUID)
@@ -136,21 +171,45 @@ AS $$
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtext('waitlist:' || p_resource_id::text));
 
-    -- For each waitlisted booking b1 of the resource, recompute its deterministic FIFO position
-    -- within its overlapping time window cluster (1 + count of prior overlapping waitlisted bookings).
-    UPDATE public.bookings b1
-    SET waitlist_position = (
-        SELECT COUNT(*) + 1
-        FROM public.bookings b2
-        WHERE b2.resource_id = b1.resource_id
-          AND b2.status = 'waitlisted'
-          AND b2.id <> b1.id
-          AND (b2.created_at < b1.created_at OR (b2.created_at = b1.created_at AND b2.id < b1.id))
-          AND tstzrange(b2.start_time, b2.end_time, '[)') && tstzrange(b1.start_time, b1.end_time, '[)')
+    WITH sorted_intervals AS (
+        SELECT 
+            id,
+            start_time,
+            end_time,
+            created_at,
+            MAX(end_time) OVER (
+                ORDER BY start_time ASC, end_time DESC, created_at ASC, id ASC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS prev_max_end
+        FROM public.bookings
+        WHERE resource_id = p_resource_id
+          AND status = 'waitlisted'
     ),
-    updated_at = now()
-    WHERE b1.resource_id = p_resource_id
-      AND b1.status = 'waitlisted';
+    clustered AS (
+        SELECT 
+            id,
+            created_at,
+            SUM(CASE WHEN prev_max_end IS NULL OR start_time >= prev_max_end THEN 1 ELSE 0 END) OVER (
+                ORDER BY start_time ASC, end_time DESC, created_at ASC, id ASC
+                ROWS UNBOUNDED PRECEDING
+            ) AS cluster_id
+        FROM sorted_intervals
+    ),
+    ranked AS (
+        SELECT 
+            id,
+            ROW_NUMBER() OVER (
+                PARTITION BY cluster_id 
+                ORDER BY created_at ASC, id ASC
+            ) AS new_pos
+        FROM clustered
+    )
+    UPDATE public.bookings b
+    SET waitlist_position = ranked.new_pos,
+        updated_at = now()
+    FROM ranked
+    WHERE b.id = ranked.id
+      AND b.waitlist_position IS DISTINCT FROM ranked.new_pos;
 END;
 $$;
 
@@ -296,13 +355,13 @@ GRANT EXECUTE ON FUNCTION public.request_booking(UUID, TIMESTAMPTZ, TIMESTAMPTZ,
 
 -- ------------------------------------------------------------------------------
 -- 6. RPC 2: approve_booking
--- Approves a booking.
--- Shared resource lock is acquired FIRST before inspecting custody state.
--- Precise Overdue Custody Rule:
--- 1. If resource has an unreturned 'overdue' booking, no new booking starting within
---    24 hours of now() can be approved until the overdue asset is returned and inspected.
--- 2. If resource has an active 'checked_in' booking, no booking starting before the
---    scheduled session end can be approved.
+-- Approves a pending or waitlisted booking.
+-- Shared resource custody lock is acquired FIRST before inspecting custody state.
+-- Active Custody Protection: An unreturned 'checked_in' or 'overdue' booking
+-- strictly blocks new approvals until physical checkout is completed, even if its
+-- scheduled end time has passed.
+-- FIFO Fairness: Enforces strictly deterministic FIFO approval order for waitlisted
+-- requests; earlier waitlisted overlapping requests cannot be bypassed.
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.approve_booking(p_booking_id UUID)
 RETURNS public.bookings
@@ -314,8 +373,7 @@ DECLARE
     v_caller_id UUID;
     v_booking public.bookings%ROWTYPE;
     v_resource public.resources%ROWTYPE;
-    v_overdue_conflict_count INTEGER;
-    v_checked_in_conflict_count INTEGER;
+    v_prior_waitlisted_id UUID;
 BEGIN
     v_caller_id := auth.uid();
     IF v_caller_id IS NULL THEN
@@ -345,34 +403,59 @@ BEGIN
         USING ERRCODE = '42501';
     END IF;
 
-    -- Lock resource custody first before evaluating checks
+    -- Shared resource custody lock acquired first
     PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_booking.resource_id::text));
 
-    -- Precise Overdue Rule: Block if overdue and starting within 24 hours of now
-    IF v_booking.start_time <= (now() + interval '24 hours') THEN
-        SELECT COUNT(*) INTO v_overdue_conflict_count
+    -- Active Custody Protection:
+    -- An unreturned checked_in or overdue booking must block new approvals until
+    -- physical checkout is completed, even if its scheduled end time has passed.
+    IF EXISTS (
+        SELECT 1
         FROM public.bookings
         WHERE resource_id = v_booking.resource_id
           AND id <> v_booking.id
-          AND status = 'overdue';
+          AND status IN ('checked_in', 'overdue')
+    ) THEN
+        RAISE EXCEPTION 'Active custody conflict: Equipment is currently in active possession of another borrower (status: checked_in or overdue). New reservations cannot be approved until physical checkout and return inspection are completed.'
+        USING ERRCODE = 'P0001';
+    END IF;
 
-        IF v_overdue_conflict_count > 0 THEN
-            RAISE EXCEPTION 'Active custody conflict: Equipment is currently OVERDUE and unreturned. Approvals for sessions starting within 24 hours are blocked until the asset is returned and inspected.'
+    -- Enforce FIFO Queue Fairness:
+    -- If approving a waitlisted booking, ensure no earlier waitlisted request on this resource
+    -- with an overlapping scheduled timeframe exists.
+    IF v_booking.status = 'waitlisted' THEN
+        SELECT id INTO v_prior_waitlisted_id
+        FROM public.bookings
+        WHERE resource_id = v_booking.resource_id
+          AND id <> v_booking.id
+          AND status = 'waitlisted'
+          AND (created_at < v_booking.created_at OR (created_at = v_booking.created_at AND id < v_booking.id))
+          AND tstzrange(start_time, end_time, '[)') && tstzrange(v_booking.start_time, v_booking.end_time, '[)')
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1;
+
+        IF v_prior_waitlisted_id IS NOT NULL THEN
+            RAISE EXCEPTION 'FIFO fairness violation: Earlier waitlisted request % exists for this overlapping timeframe. Waitlisted requests must be approved in FIFO order.', v_prior_waitlisted_id
             USING ERRCODE = 'P0001';
         END IF;
     END IF;
 
-    -- Block if checked_in and candidate start_time is before ongoing session scheduled end
-    SELECT COUNT(*) INTO v_checked_in_conflict_count
-    FROM public.bookings
-    WHERE resource_id = v_booking.resource_id
-      AND id <> v_booking.id
-      AND status = 'checked_in'
-      AND v_booking.start_time < end_time;
+    -- If approving a pending booking, ensure no earlier waitlisted request exists for overlapping timeframe
+    IF v_booking.status = 'pending' THEN
+        SELECT id INTO v_prior_waitlisted_id
+        FROM public.bookings
+        WHERE resource_id = v_booking.resource_id
+          AND id <> v_booking.id
+          AND status = 'waitlisted'
+          AND (created_at < v_booking.created_at OR (created_at = v_booking.created_at AND id < v_booking.id))
+          AND tstzrange(start_time, end_time, '[)') && tstzrange(v_booking.start_time, v_booking.end_time, '[)')
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1;
 
-    IF v_checked_in_conflict_count > 0 THEN
-        RAISE EXCEPTION 'Active custody conflict: Equipment is currently checked in. Candidate booking start_time conflicts with ongoing session.'
-        USING ERRCODE = 'P0001';
+        IF v_prior_waitlisted_id IS NOT NULL THEN
+            RAISE EXCEPTION 'FIFO fairness violation: Prior waitlisted reservation % exists for this overlapping timeframe. Waitlist queue has priority over newly pending requests.', v_prior_waitlisted_id
+            USING ERRCODE = 'P0001';
+        END IF;
     END IF;
 
     BEGIN
@@ -503,7 +586,8 @@ GRANT EXECUTE ON FUNCTION public.reject_booking(UUID, TEXT) TO authenticated, se
 
 -- ------------------------------------------------------------------------------
 -- 8. RPC 4: waitlist_booking
--- Moves a booking to waitlist with deterministic FIFO position per resource/time window.
+-- Moves a pending booking to the waitlist.
+-- Recalculates connected-cluster positions and returns the updated booking row.
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.waitlist_booking(p_booking_id UUID)
 RETURNS public.bookings
@@ -515,7 +599,6 @@ DECLARE
     v_caller_id UUID;
     v_booking public.bookings%ROWTYPE;
     v_resource public.resources%ROWTYPE;
-    v_next_pos INTEGER;
 BEGIN
     v_caller_id := auth.uid();
     IF v_caller_id IS NULL THEN
@@ -547,21 +630,16 @@ BEGIN
 
     PERFORM pg_advisory_xact_lock(hashtext('waitlist:' || v_booking.resource_id::text));
 
-    SELECT COUNT(*) + 1
-    INTO v_next_pos
-    FROM public.bookings
-    WHERE resource_id = v_booking.resource_id 
-      AND status = 'waitlisted'
-      AND id <> v_booking.id
-      AND (created_at < v_booking.created_at OR (created_at = v_booking.created_at AND id < v_booking.id))
-      AND tstzrange(start_time, end_time, '[)') && tstzrange(v_booking.start_time, v_booking.end_time, '[)');
-
     UPDATE public.bookings
     SET status = 'waitlisted',
-        waitlist_position = v_next_pos,
         updated_at = now()
-    WHERE id = p_booking_id
-    RETURNING * INTO v_booking;
+    WHERE id = p_booking_id;
+
+    PERFORM public.recalculate_waitlist(v_booking.resource_id);
+
+    SELECT * INTO v_booking
+    FROM public.bookings
+    WHERE id = p_booking_id;
 
     INSERT INTO public.audit_logs (actor_id, action, entity_type, entity_id, details)
     VALUES (
@@ -572,7 +650,7 @@ BEGIN
         jsonb_build_object(
             'resource_id', v_booking.resource_id,
             'requester_id', v_booking.requester_id,
-            'waitlist_position', v_next_pos
+            'waitlist_position', v_booking.waitlist_position
         )
     );
 
@@ -666,6 +744,7 @@ GRANT EXECUTE ON FUNCTION public.cancel_booking(UUID) TO authenticated, service_
 -- STRICT FRONTEND CONTRACT: generate_booking_pass(p_booking_id, p_token_type)
 -- STRICT AUTHORIZATION: ONLY the booking requester (seeker) can obtain the raw token!
 -- Stored ONLY as SHA-256 hash. Returns raw token string ONCE to the seeker.
+-- Returns both 'token' and 'raw_token' in JSON response for contract reconciliation.
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.generate_booking_pass(
     p_booking_id UUID,
@@ -729,8 +808,8 @@ BEGIN
       AND token_type = p_token_type
       AND used_at IS NULL;
 
-    v_raw_token := encode(gen_random_bytes(32), 'hex');
-    v_token_hash := encode(digest(v_raw_token, 'sha256'), 'hex');
+    v_raw_token := extensions.encode(extensions.gen_random_bytes(32), 'hex');
+    v_token_hash := extensions.encode(extensions.digest(v_raw_token, 'sha256'), 'hex');
 
     INSERT INTO public.booking_access_tokens (
         booking_id,
@@ -760,6 +839,7 @@ BEGIN
         'booking_id', p_booking_id,
         'token_type', p_token_type,
         'token', v_raw_token,
+        'raw_token', v_raw_token,
         'expires_at', v_expires_at
     );
 END;
@@ -774,6 +854,8 @@ GRANT EXECUTE ON FUNCTION public.generate_booking_pass(UUID, TEXT) TO authentica
 -- Physical QR Handshake: Seeker displays token, Authenticated Custodian scans and verifies.
 -- Shared resource custody lock acquired FIRST before checking active custody.
 -- Custody rechecked under lock to guarantee concurrent check-ins cannot both succeed.
+-- Active custody blocks check-ins if another booking is checked_in or overdue.
+-- Returns full public.bookings row matching frontend contract.
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.verify_check_in(
     p_raw_token TEXT,
@@ -805,7 +887,7 @@ BEGIN
         USING ERRCODE = '22023';
     END IF;
 
-    v_token_hash := encode(digest(trim(p_raw_token), 'sha256'), 'hex');
+    v_token_hash := extensions.encode(extensions.digest(trim(p_raw_token), 'sha256'), 'hex');
 
     SELECT * INTO v_token_record
     FROM public.booking_access_tokens
@@ -929,6 +1011,8 @@ GRANT EXECUTE ON FUNCTION public.verify_check_in(TEXT, TEXT, TEXT, TEXT) TO auth
 -- Physical QR Return Handshake: Seeker returns asset, Owner verifies and checks out.
 -- Resolves booking SOLELY from token hash. Atomically records post-condition report.
 -- Automatically logs an open incident if damaged or faulty.
+-- Releases active custody protection (status becomes 'returned').
+-- Returns full public.bookings row matching frontend contract.
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.verify_check_out(
     p_raw_token TEXT,
@@ -960,7 +1044,7 @@ BEGIN
         USING ERRCODE = '22023';
     END IF;
 
-    v_token_hash := encode(digest(trim(p_raw_token), 'sha256'), 'hex');
+    v_token_hash := extensions.encode(extensions.digest(trim(p_raw_token), 'sha256'), 'hex');
 
     SELECT * INTO v_token_record
     FROM public.booking_access_tokens
@@ -1098,7 +1182,8 @@ GRANT EXECUTE ON FUNCTION public.verify_check_out(TEXT, TEXT, TEXT, TEXT) TO aut
 -- ------------------------------------------------------------------------------
 -- 13. RPC 9: mark_overdue_bookings
 -- Identifies checked_in bookings where end_time has passed and transitions to overdue.
--- Retains active custody protection. RESTRICTED TO service_role ONLY.
+-- Uses shared resource-custody advisory lock and rechecks status under lock.
+-- RESTRICTED TO service_role ONLY.
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.mark_overdue_bookings()
 RETURNS INTEGER
@@ -1118,42 +1203,48 @@ BEGIN
           AND b.end_time < now()
         FOR UPDATE OF b
     LOOP
-        UPDATE public.bookings
-        SET status = 'overdue',
-            updated_at = now()
-        WHERE id = v_record.id;
+        -- Acquire shared resource custody lock
+        PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_record.resource_id::text));
 
-        INSERT INTO public.notifications (user_id, title, message, link_url)
-        VALUES (
-            v_record.requester_id,
-            'Action Required: Overdue Equipment Return',
-            'Your reservation for "' || v_record.resource_title || '" has elapsed. Please check out and return the asset immediately.',
-            '/seeker/bookings'
-        );
+        -- Recheck that booking is still checked_in under lock
+        IF EXISTS (SELECT 1 FROM public.bookings WHERE id = v_record.id AND status = 'checked_in') THEN
+            UPDATE public.bookings
+            SET status = 'overdue',
+                updated_at = now()
+            WHERE id = v_record.id;
 
-        INSERT INTO public.notifications (user_id, title, message, link_url)
-        VALUES (
-            v_record.owner_id,
-            'Alert: Equipment Overdue',
-            'Reservation for "' || v_record.resource_title || '" is past its scheduled return time and has not been checked out.',
-            '/owner/bookings'
-        );
+            INSERT INTO public.notifications (user_id, title, message, link_url)
+            VALUES (
+                v_record.requester_id,
+                'Action Required: Overdue Equipment Return',
+                'Your reservation for "' || v_record.resource_title || '" has elapsed. Please check out and return the asset immediately.',
+                '/seeker/bookings'
+            );
 
-        INSERT INTO public.audit_logs (actor_id, action, entity_type, entity_id, details)
-        VALUES (
-            NULL,
-            'BOOKING_MARKED_OVERDUE',
-            'booking',
-            v_record.id,
-            jsonb_build_object(
-                'actor', 'system',
-                'resource_id', v_record.resource_id,
-                'requester_id', v_record.requester_id,
-                'marked_at', now()
-            )
-        );
+            INSERT INTO public.notifications (user_id, title, message, link_url)
+            VALUES (
+                v_record.owner_id,
+                'Alert: Equipment Overdue',
+                'Reservation for "' || v_record.resource_title || '" is past its scheduled return time and has not been checked out.',
+                '/owner/bookings'
+            );
 
-        v_updated_count := v_updated_count + 1;
+            INSERT INTO public.audit_logs (actor_id, action, entity_type, entity_id, details)
+            VALUES (
+                NULL,
+                'BOOKING_MARKED_OVERDUE',
+                'booking',
+                v_record.id,
+                jsonb_build_object(
+                    'actor', 'system',
+                    'resource_id', v_record.resource_id,
+                    'requester_id', v_record.requester_id,
+                    'marked_at', now()
+                )
+            );
+
+            v_updated_count := v_updated_count + 1;
+        END IF;
     END LOOP;
 
     RETURN v_updated_count;

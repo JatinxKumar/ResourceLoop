@@ -42,6 +42,14 @@ export async function runBookingServiceContractCheck(): Promise<boolean> {
     image_url: undefined,
   };
 
+  const samplePassResponse: BookingPassResponse = {
+    booking_id: '11111111-1111-1111-1111-111111111111',
+    token_type: 'check_in',
+    token: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    raw_token: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    expires_at: new Date(Date.now() + 3600000).toISOString(),
+  };
+
   // Compile-time assertion checks
   if (typeof requestBooking !== 'function' ||
       typeof approveBooking !== 'function' ||

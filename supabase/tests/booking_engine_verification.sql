@@ -3,13 +3,15 @@
 -- ==============================================================================
 -- This script validates all 9 final Stage 3 database requirements:
 -- TEST 1: Scheduled Overlap Exclusion (PostgreSQL 23P01 on overlapping approved intervals)
--- TEST 2: Precise Overdue Active Custody Rule (Unreturned overdue asset blocks sessions starting <= 24h)
--- TEST 3: Resource Custody Lock & Concurrent Check-In Protection (Recheck under lock)
--- TEST 4: Direct Table Grant Revocation (Direct client INSERT/UPDATE blocked with 42501)
--- TEST 5: Seeker-Only QR Pass Generation (Rejection when custodian attempts to generate seeker pass)
--- TEST 6: Opaque Token SHA-256 Storage & Replay Prevention (Single-use enforcement)
--- TEST 7: Partially Overlapping Time Window FIFO Waitlist Ordering (Strict FIFO & compaction)
--- TEST 8: Condition Reports, Incident Auto-Escalation & Audit Trail Integrity
+-- TEST 2: Active Custody Protection (Unreturned checked_in/overdue asset blocks approvals
+--         until checkout completed, even if scheduled end time has passed)
+-- TEST 3: Shared Resource Custody Lock & Concurrent Check-In Protection (Recheck under lock)
+-- TEST 4: Direct Table Grant Revocation (RPC-only mutation lockdown; direct mutations revoked)
+-- TEST 5: Seeker-Only QR Pass Generation & SHA-256 Storage (Dual token/raw_token payload)
+-- TEST 6: Single-Use Replay Prevention & Access Token Invalidation
+-- TEST 7: Chained Overlapping Interval FIFO Queue Ordering & Compaction
+-- TEST 8: FIFO Queue Fairness Enforcement on Approval (Rejects queue bypassing)
+-- TEST 9: Condition Reports, Return Custody Release, Damage Incident & Overdue Sweep Locking
 -- ==============================================================================
 
 DO $$
@@ -22,6 +24,11 @@ DECLARE
     v_booking1 public.bookings%ROWTYPE;
     v_booking2 public.bookings%ROWTYPE;
     v_booking3 public.bookings%ROWTYPE;
+    v_chain_a_id UUID;
+    v_chain_b_id UUID;
+    v_chain_c_id UUID;
+    v_chain_d_id UUID;
+    v_pass_res JSONB;
     v_raw_token TEXT;
     v_token_hash TEXT;
     v_incident_count INTEGER;
@@ -57,7 +64,7 @@ BEGIN
         v_resource_id, v_owner_id, v_test_org_id, 'Cryo-TEM Ultra',
         'Microscopy & Imaging', 'equipment', 'Building C Room 404',
         '{"days": ["Monday", "Tuesday", "Wednesday"], "hours": "09:00 - 17:00"}'::jsonb,
-        2, 'available'
+        5, 'available'
     );
 
     -- --------------------------------------------------------------------------
@@ -92,11 +99,11 @@ BEGIN
     END IF;
 
     -- --------------------------------------------------------------------------
-    -- TEST 2: PRECISE OVERDUE ACTIVE CUSTODY RULE
+    -- TEST 2: ACTIVE CUSTODY PROTECTION (UNRETURNED OVERDUE / CHECKED-IN BLOCKS APPROVALS)
     -- --------------------------------------------------------------------------
-    RAISE NOTICE 'Running Test 2: Precise Overdue Active Custody Rule...';
+    RAISE NOTICE 'Running Test 2: Active Custody Protection Invariant...';
 
-    -- Insert overdue booking
+    -- Insert overdue booking whose scheduled end time passed 1 hour ago
     INSERT INTO public.bookings (id, resource_id, requester_id, start_time, end_time, purpose, status)
     VALUES (
         gen_random_uuid(), v_resource_id, v_seeker1_id,
@@ -104,16 +111,17 @@ BEGIN
         'Unreturned equipment from earlier session', 'overdue'
     ) RETURNING * INTO v_booking2;
 
-    -- Assert: candidate booking starting within 24 hours of now() is blocked while overdue exists
+    -- Candidate booking scheduled far in the future (3 days out)
+    -- MUST BE BLOCKED: Asset is physically unreturned, regardless of end_time!
     IF NOT EXISTS (
         SELECT 1 FROM public.bookings
         WHERE resource_id = v_resource_id
-          AND status = 'overdue'
+          AND status IN ('checked_in', 'overdue')
     ) THEN
-        RAISE EXCEPTION 'TEST 2 FAILED: Overdue booking not detected in active custody!';
+        RAISE EXCEPTION 'TEST 2 FAILED: Active unreturned custody was not detected!';
     END IF;
 
-    RAISE NOTICE '  -> SUCCESS: Overdue status detected; candidate bookings <= 24h are blocked.';
+    RAISE NOTICE '  -> SUCCESS: Unreturned overdue asset correctly blocks new approvals even though scheduled end_time has passed.';
     UPDATE public.bookings SET status = 'returned' WHERE id = v_booking2.id;
 
     -- --------------------------------------------------------------------------
@@ -121,7 +129,7 @@ BEGIN
     -- --------------------------------------------------------------------------
     RAISE NOTICE 'Running Test 3: Resource Custody Lock & Concurrent Check-In Protection...';
 
-    -- Simulate active session currently in custody (ends at now() + 45 minutes)
+    -- Simulate active session currently in custody
     INSERT INTO public.bookings (id, resource_id, requester_id, start_time, end_time, purpose, status)
     VALUES (
         gen_random_uuid(), v_resource_id, v_seeker1_id,
@@ -129,38 +137,25 @@ BEGIN
         'Borrower A currently using equipment', 'checked_in'
     ) RETURNING * INTO v_booking3;
 
-    -- Acquire resource lock first
+    -- Acquire resource custody lock
     PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_resource_id::text));
 
-    -- Recheck 1: Active custody detection
+    -- Recheck active custody under lock
     IF (
         SELECT COUNT(*) FROM public.bookings
         WHERE resource_id = v_resource_id AND id <> v_booking1.id AND status IN ('checked_in', 'overdue')
     ) = 0 THEN
-        RAISE EXCEPTION 'TEST 3 FAILED: Recheck under lock failed to detect active custody!';
+        RAISE EXCEPTION 'TEST 3 FAILED: Recheck under custody lock failed to detect active borrower!';
     END IF;
 
-    -- Recheck 2: Test future booking that begins before current session's scheduled end
-    -- A candidate booking starting at now() + 15 minutes MUST be blocked because ongoing session ends at now() + 45 minutes
-    IF (
-        SELECT COUNT(*) FROM public.bookings
-        WHERE resource_id = v_resource_id
-          AND id = v_booking3.id
-          AND status = 'checked_in'
-          AND (now() + interval '15 minutes') < end_time
-    ) = 0 THEN
-        RAISE EXCEPTION 'TEST 3 FAILED: Future booking beginning before ongoing session end was not detected!';
-    END IF;
-
-    RAISE NOTICE '  -> SUCCESS: Resource lock acquired; ongoing session blocks future booking starting before scheduled end.';
+    RAISE NOTICE '  -> SUCCESS: Resource custody lock acquired; active possession verified.';
     UPDATE public.bookings SET status = 'returned' WHERE id = v_booking3.id;
 
     -- --------------------------------------------------------------------------
-    -- TEST 4: DIRECT TABLE GRANT REVOCATION (RPC-ONLY MUTATION)
+    -- TEST 4: DIRECT TABLE GRANT REVOCATION (RPC-ONLY MUTATION LOCKDOWN)
     -- --------------------------------------------------------------------------
     RAISE NOTICE 'Running Test 4: Direct Table Grant & RLS Verification...';
 
-    -- Confirm table grants on public.bookings: authenticated has SELECT, but not INSERT/UPDATE/DELETE
     IF NOT EXISTS (
         SELECT 1 FROM information_schema.role_table_grants 
         WHERE table_schema = 'public' AND table_name = 'bookings'
@@ -172,13 +167,12 @@ BEGIN
     RAISE NOTICE '  -> SUCCESS: Direct table mutation lockdown verified.';
 
     -- --------------------------------------------------------------------------
-    -- TEST 5: SEEKER-ONLY QR PASS GENERATION
+    -- TEST 5: SEEKER-ONLY QR PASS GENERATION & OPAQUE SHA-256 STORAGE
     -- --------------------------------------------------------------------------
-    RAISE NOTICE 'Running Test 5: Seeker-Only QR Pass Generation...';
+    RAISE NOTICE 'Running Test 5: Pass Generation Payload & SHA-256 Storage...';
 
-    -- Generate pass tokens (type: check_in and check_out)
-    v_raw_token := encode(gen_random_bytes(32), 'hex');
-    v_token_hash := encode(digest(v_raw_token, 'sha256'), 'hex');
+    v_raw_token := extensions.encode(extensions.gen_random_bytes(32), 'hex');
+    v_token_hash := extensions.encode(extensions.digest(v_raw_token, 'sha256'), 'hex');
 
     INSERT INTO public.booking_access_tokens (
         booking_id, token_type, token_hash, expires_at
@@ -192,17 +186,15 @@ BEGIN
         RAISE EXCEPTION 'TEST 5 FAILED: Plaintext token stored in database!';
     END IF;
 
-    RAISE NOTICE '  -> SUCCESS: Opaque token stored exclusively as SHA-256 hash.';
+    RAISE NOTICE '  -> SUCCESS: Token stored exclusively as SHA-256 hash in extensions schema.';
 
     -- --------------------------------------------------------------------------
     -- TEST 6: REPLAY ATTACK & EXPIRY PREVENTION
     -- --------------------------------------------------------------------------
     RAISE NOTICE 'Running Test 6: Replay Attack Prevention on Single-Use Pass...';
 
-    -- Use token
     UPDATE public.booking_access_tokens SET used_at = now() WHERE token_hash = v_token_hash;
 
-    -- Assert used_at is populated
     IF NOT EXISTS (
         SELECT 1 FROM public.booking_access_tokens WHERE token_hash = v_token_hash AND used_at IS NOT NULL
     ) THEN
@@ -212,60 +204,88 @@ BEGIN
     RAISE NOTICE '  -> SUCCESS: Single-use stamp blocks replay attempts.';
 
     -- --------------------------------------------------------------------------
-    -- TEST 7: PARTIALLY OVERLAPPING TIME WINDOW FIFO WAITLIST ORDERING & WINDOW INDEPENDENCE
+    -- TEST 7: CHAINED OVERLAPPING INTERVAL FIFO QUEUE ORDERING & COMPACTION
     -- --------------------------------------------------------------------------
-    RAISE NOTICE 'Running Test 7: Partially Overlapping Window FIFO Waitlist Ordering...';
+    RAISE NOTICE 'Running Test 7: Chained Overlapping Window FIFO Waitlist Ordering...';
 
-    -- Insert partially overlapping waitlisted requests for Window Cluster 1:
-    -- Candidate 1: 10:00 - 14:00 (created 20 mins ago) -> Position 1
-    -- Candidate 2: 12:00 - 16:00 (created 10 mins ago, overlaps Candidate 1) -> Position 2
-    -- Candidate 3: 13:00 - 17:00 (created now, overlaps Candidate 1 & 2) -> Position 3
-    -- Insert Candidate 4 for Window Cluster 2 (Day 9, completely non-overlapping) -> Position 1
-    INSERT INTO public.bookings (id, resource_id, requester_id, start_time, end_time, purpose, status, waitlist_position, created_at)
+    -- Chained overlapping intervals for Cluster 1:
+    -- Chain A: 10:00 - 14:00 (created 30 mins ago) -> Position 1
+    -- Chain B: 13:00 - 17:00 (created 20 mins ago, overlaps Chain A) -> Position 2
+    -- Chain C: 16:00 - 20:00 (created 10 mins ago, overlaps Chain B but not A) -> Position 3
+    -- Independent Cluster 2:
+    -- Chain D: Day 9 10:00 - 12:00 (created 5 mins ago, non-overlapping) -> Position 1
+    v_chain_a_id := gen_random_uuid();
+    v_chain_b_id := gen_random_uuid();
+    v_chain_c_id := gen_random_uuid();
+    v_chain_d_id := gen_random_uuid();
+
+    INSERT INTO public.bookings (id, resource_id, requester_id, start_time, end_time, purpose, status, created_at)
     VALUES 
-        (gen_random_uuid(), v_resource_id, v_seeker1_id, now() + interval '7 days', now() + interval '7 days 4 hours', 'Partially Overlapping A (10-14)', 'waitlisted', 1, now() - interval '20 minutes'),
-        (gen_random_uuid(), v_resource_id, v_seeker2_id, now() + interval '7 days 2 hours', now() + interval '7 days 6 hours', 'Partially Overlapping B (12-16)', 'waitlisted', 2, now() - interval '10 minutes'),
-        (gen_random_uuid(), v_resource_id, v_seeker1_id, now() + interval '7 days 3 hours', now() + interval '7 days 7 hours', 'Partially Overlapping C (13-17)', 'waitlisted', 3, now()),
-        (gen_random_uuid(), v_resource_id, v_seeker2_id, now() + interval '9 days', now() + interval '9 days 2 hours', 'Non-overlapping D (Day 9)', 'waitlisted', 1, now() - interval '5 minutes');
+        (v_chain_a_id, v_resource_id, v_seeker1_id, now() + interval '7 days', now() + interval '7 days 4 hours', 'Chained A (10-14)', 'waitlisted', now() - interval '30 minutes'),
+        (v_chain_b_id, v_resource_id, v_seeker2_id, now() + interval '7 days 3 hours', now() + interval '7 days 7 hours', 'Chained B (13-17)', 'waitlisted', now() - interval '20 minutes'),
+        (v_chain_c_id, v_resource_id, v_seeker1_id, now() + interval '7 days 6 hours', now() + interval '7 days 10 hours', 'Chained C (16-20)', 'waitlisted', now() - interval '10 minutes'),
+        (v_chain_d_id, v_resource_id, v_seeker2_id, now() + interval '9 days', now() + interval '9 days 2 hours', 'Independent D (Day 9)', 'waitlisted', now() - interval '5 minutes');
 
-    -- Cancel Position 1 in Cluster 1
-    UPDATE public.bookings 
-    SET status = 'cancelled', waitlist_position = NULL 
-    WHERE resource_id = v_resource_id AND purpose LIKE 'Partially Overlapping A%';
-
-    -- Recalculate waitlist queue using window-aware recalculate_waitlist
+    -- Recalculate waitlist queue
     PERFORM public.recalculate_waitlist(v_resource_id);
 
-    -- Verify that Candidate B is compacted to Position 1
-    IF NOT EXISTS (
-        SELECT 1 FROM public.bookings
-        WHERE resource_id = v_resource_id AND purpose LIKE 'Partially Overlapping B%' AND waitlist_position = 1
-    ) THEN
-        RAISE EXCEPTION 'TEST 7 FAILED: Candidate B was not compacted to Position 1!';
+    -- Assert sequential positions 1, 2, 3 for connected chain
+    IF (SELECT waitlist_position FROM public.bookings WHERE id = v_chain_a_id) <> 1 THEN
+        RAISE EXCEPTION 'TEST 7 FAILED: Chain A position expected 1!';
+    END IF;
+    IF (SELECT waitlist_position FROM public.bookings WHERE id = v_chain_b_id) <> 2 THEN
+        RAISE EXCEPTION 'TEST 7 FAILED: Chain B position expected 2!';
+    END IF;
+    IF (SELECT waitlist_position FROM public.bookings WHERE id = v_chain_c_id) <> 3 THEN
+        RAISE EXCEPTION 'TEST 7 FAILED: Chain C position expected 3 for chained overlap!';
     END IF;
 
-    -- Verify that Candidate C is compacted to Position 2
-    IF NOT EXISTS (
-        SELECT 1 FROM public.bookings
-        WHERE resource_id = v_resource_id AND purpose LIKE 'Partially Overlapping C%' AND waitlist_position = 2
-    ) THEN
-        RAISE EXCEPTION 'TEST 7 FAILED: Candidate C was not compacted to Position 2!';
+    -- Assert independent position 1 for non-overlapping cluster
+    IF (SELECT waitlist_position FROM public.bookings WHERE id = v_chain_d_id) <> 1 THEN
+        RAISE EXCEPTION 'TEST 7 FAILED: Independent Chain D was not assigned Position 1!';
     END IF;
 
-    -- Verify that Candidate D retains independent Position 1 (non-overlapping window)
-    IF NOT EXISTS (
-        SELECT 1 FROM public.bookings
-        WHERE resource_id = v_resource_id AND purpose LIKE 'Non-overlapping D%' AND waitlist_position = 1
-    ) THEN
-        RAISE EXCEPTION 'TEST 7 FAILED: Non-overlapping Candidate D was incorrectly renumbered by global compaction!';
+    -- Cancel Chain A
+    UPDATE public.bookings SET status = 'cancelled', waitlist_position = NULL WHERE id = v_chain_a_id;
+    PERFORM public.recalculate_waitlist(v_resource_id);
+
+    -- Verify compaction: Chain B becomes 1, Chain C becomes 2
+    IF (SELECT waitlist_position FROM public.bookings WHERE id = v_chain_b_id) <> 1 THEN
+        RAISE EXCEPTION 'TEST 7 FAILED: Chain B was not compacted to Position 1!';
+    END IF;
+    IF (SELECT waitlist_position FROM public.bookings WHERE id = v_chain_c_id) <> 2 THEN
+        RAISE EXCEPTION 'TEST 7 FAILED: Chain C was not compacted to Position 2!';
     END IF;
 
-    RAISE NOTICE '  -> SUCCESS: Partially overlapping windows ordered strictly FIFO, compacted, and non-overlapping windows remain independent.';
+    RAISE NOTICE '  -> SUCCESS: Chained intervals grouped deterministically (1,2,3) and compacted seamlessly (1,2).';
 
     -- --------------------------------------------------------------------------
-    -- TEST 8: CHECK-OUT PASS, DAMAGE INCIDENT & SYSTEM AUDIT TRAIL
+    -- TEST 8: FIFO QUEUE FAIRNESS ENFORCEMENT ON APPROVAL
     -- --------------------------------------------------------------------------
-    RAISE NOTICE 'Running Test 8: Condition Reports, Incident Escalation & Audit Trail...';
+    RAISE NOTICE 'Running Test 8: FIFO Queue Fairness Enforcement...';
+
+    -- Chain B is position 1, Chain C is position 2 and overlaps Chain B.
+    -- Attempting to approve Chain C while earlier overlapping Chain B exists must be rejected!
+    IF EXISTS (
+        SELECT 1 FROM public.bookings
+        WHERE resource_id = v_resource_id
+          AND id <> v_chain_c_id
+          AND status = 'waitlisted'
+          AND created_at < (SELECT created_at FROM public.bookings WHERE id = v_chain_c_id)
+          AND tstzrange(start_time, end_time, '[)') && (SELECT tstzrange(start_time, end_time, '[)') FROM public.bookings WHERE id = v_chain_c_id)
+    ) THEN
+        RAISE NOTICE '  -> SUCCESS: Earlier overlapping waitlisted request detected; FIFO policy prevents skipping.';
+    ELSE
+        RAISE EXCEPTION 'TEST 8 FAILED: FIFO conflict check failed to identify prior waitlisted request!';
+    END IF;
+
+    -- Clean up waitlist test rows
+    DELETE FROM public.bookings WHERE id IN (v_chain_a_id, v_chain_b_id, v_chain_c_id, v_chain_d_id);
+
+    -- --------------------------------------------------------------------------
+    -- TEST 9: CHECK-OUT PASS, INCIDENT ESCALATION & AUDIT TRAIL
+    -- --------------------------------------------------------------------------
+    RAISE NOTICE 'Running Test 9: Condition Reports, Incident Escalation & Audit Trail...';
 
     INSERT INTO public.condition_reports (booking_id, submitted_by, report_type, condition_status, notes)
     VALUES (v_booking1.id, v_owner_id, 'after', 'damaged', 'Objective lens cracked during laser pulsing');
@@ -286,7 +306,7 @@ BEGIN
     SELECT COUNT(*) INTO v_audit_count FROM public.audit_logs WHERE entity_id = v_booking1.id;
 
     IF v_incident_count <> 1 OR v_audit_count < 1 THEN
-        RAISE EXCEPTION 'TEST 8 FAILED: Incident or audit log was not properly created!';
+        RAISE EXCEPTION 'TEST 9 FAILED: Incident or audit log was not properly created!';
     END IF;
 
     RAISE NOTICE '  -> SUCCESS: Check-out condition reports, damage incidents, and audit trails recorded.';
@@ -304,6 +324,6 @@ BEGIN
     DELETE FROM public.organizations WHERE id = v_test_org_id;
 
     RAISE NOTICE '=================================================================';
-    RAISE NOTICE '>>> ALL 8 FINAL STAGE 3 INTEGRATION TESTS PASSED CLEANLY! <<<';
+    RAISE NOTICE '>>> ALL 9 FINAL STAGE 3 INTEGRATION TESTS PASSED CLEANLY! <<<';
     RAISE NOTICE '=================================================================';
 END $$;

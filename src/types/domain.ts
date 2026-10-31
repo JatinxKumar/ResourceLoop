@@ -348,6 +348,7 @@ export interface BookingPassResponse {
   booking_id: string;
   token_type: 'check_in' | 'check_out';
   token: string;
+  raw_token: string;
   expires_at: string;
 }
 

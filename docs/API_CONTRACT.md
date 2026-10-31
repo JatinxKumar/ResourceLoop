@@ -1,12 +1,12 @@
 # ResourceLoop Frontend Integration & Service Layer Contract
 
-This document provides frontend engineers with data contracts, exported backend services, query patterns, workflow state transitions, and Supabase client examples for ResourceLoop.
+This document provides frontend engineers with data contracts, exported backend services, query patterns, workflow state transitions, exact RPC signatures, and Supabase client integration patterns for ResourceLoop.
 
 ---
 
 ## 1. Service Layer Architecture
 
-The backend exposes a modular service layer under `src/services/` that interacts with Supabase while enforcing data validation, Row Level Security (RLS), and business logic.
+The backend exposes a modular service layer under `src/services/` that interacts with Supabase while enforcing data validation, Row Level Security (RLS), and business logic. Direct client mutations (`INSERT`, `UPDATE`, `DELETE`) on `public.bookings` are strictly revoked; all lifecycle changes execute via PostgreSQL `SECURITY DEFINER` RPCs.
 
 ### 1.1 Resource Management Service (`src/services/resources.ts`)
 
@@ -97,227 +97,208 @@ import {
   fetchUserBookings,
   fetchOwnerBookings,
   getBookingTimeline,
+  listBookings,
 } from '../services/bookings';
 ```
 
 #### Function Specifications:
 
-| Function | Parameters | Return Type | Description |
+| Function | Parameters | TypeScript Return | SQL Equivalent | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| **`requestBooking`** | `dto: CreateBookingDTO` | `Promise<Booking>` | `public.request_booking` | **Exclusive client creation path**. Direct INSERT revoked. Atomically validates eligibility, organization status, and usage limits; inserts pending reservation. |
+| **`approveBooking`** | `bookingId: string` | `Promise<Booking>` | `public.approve_booking` | Approves reservation. Acquires `resource_custody` lock. Enforces **active custody protection** (unreturned `checked_in` or `overdue` blocks new approvals) and GiST exclusion. Enforces FIFO queue order. |
+| **`rejectBooking`** | `bookingId: string, rejectionReason: string` | `Promise<Booking>` | `public.reject_booking` | Rejects reservation with mandatory explanation; invalidates unused tokens and triggers waitlist recalculation. |
+| **`waitlistBooking`**| `bookingId: string` | `Promise<Booking>` | `public.waitlist_booking` | Places pending reservation on the waitlist. Assigns deterministic connected-cluster position; returns updated `Booking`. |
+| **`cancelBooking`** | `bookingId: string` | `Promise<Booking>` | `public.cancel_booking` | Cancels reservation prior to check-in (requester for own booking, or owner/admin); recalculates waitlist. |
+| **`generateBookingPass`** | `bookingId: string, tokenType: 'check_in' \| 'check_out'` | `Promise<BookingPassResponse>` | `public.generate_booking_pass` | STRICT: Seeker only (`auth.uid() = requester_id`). Generates 256-bit cryptographically secure pass. Stores SHA-256 hash. Returns both `token` and `raw_token`. |
+| **`verifyCheckIn`** | `dto: VerifyHandshakeDTO` | `Promise<Booking>` | `public.verify_check_in` | Custodian scans QR pass. Acquires `resource_custody` lock; rechecks active custody; logs pre-condition report; marks `checked_in`. |
+| **`verifyCheckOut`**| `dto: VerifyHandshakeDTO` | `Promise<Booking>` | `public.verify_check_out` | Custodian scans return pass. Acquires `resource_custody` lock; logs post-condition report; auto-opens incident if damaged; marks `returned` (restores custody). |
+| **`markOverdueBookings`** | *none* | `Promise<number>` | `public.mark_overdue_bookings` | Background maintenance sweep. Acquires `resource_custody` lock per asset; transitions `checked_in` past `end_time` to `overdue`. Restricted to `service_role`. |
+| **`getBookingById`** | `id: string` | `Promise<Booking \| null>` | SELECT query | Retrieves booking with full joins (resource, org, profiles, condition reports, incidents). |
+| **`fetchUserBookings`**| `userId?: string` | `Promise<Booking[]>` | SELECT query | Retrieves reservations requested by seeker (defaults to authenticated user). |
+| **`fetchOwnerBookings`**| `ownerId?: string` | `Promise<Booking[]>` | SELECT query | Retrieves reservations for all resources managed by owner. |
+| **`getBookingTimeline`**| `bookingId: string` | `Promise<{ booking, conditionReports, incidents, auditLogs }>` | Multi-table query | Complete operational history and compliance audit trail. |
+
+---
+
+## 2. PostgreSQL RPC Contract & Backend Specification
+
+All booking mutations are encapsulated in PostgreSQL `SECURITY DEFINER` functions located in the `public` schema with explicit search path configuration:
+```sql
+SET search_path = pg_catalog, extensions, pg_temp;
+```
+Direct table mutations on `public.bookings` (`INSERT`, `UPDATE`, `DELETE`) are strictly `REVOKE`d from `anon` and `authenticated` roles.
+
+### 2.1 Complete RPC Contract Matrix
+
+| RPC Name | Parameter Names & Types | Return Type | Authorization & Grants |
 | :--- | :--- | :--- | :--- |
-| **`requestBooking`** | `dto: CreateBookingDTO` | `Promise<Booking>` | **Exclusive client creation path**. Direct INSERT is revoked. Atomically validates eligibility, organization verification, availability, and usage limits (including overdue), then creates pending reservation. |
-| **`approveBooking`** | `bookingId: string` | `Promise<Booking>` | Approves booking; acquires shared resource lock, enforces precise overdue custody rule (blocks sessions starting within 24h if equipment is overdue), and enforces GiST scheduled overlap constraint. |
-| **`rejectBooking`** | `bookingId: string, rejectionReason: string` | `Promise<Booking>` | Rejects booking with mandatory explanation; recalculates waitlist. |
-| **`waitlistBooking`**| `bookingId: string` | `Promise<Booking>` | Moves request to deterministic FIFO waitlist with unique queue position. |
-| **`cancelBooking`** | `bookingId: string` | `Promise<Booking>` | Cancels reservation prior to check-in (seeker or owner/admin); recalculates waitlist. |
-| **`generateBookingPass`** | `bookingId: string, tokenType: 'check_in' \| 'check_out'` | `Promise<BookingPassResponse>` | STRICT: Restricted to booking's seeker. Generates opaque 256-bit single-use pass for screen display; stores only SHA-256 hash. |
-| **`verifyCheckIn`** | `dto: VerifyHandshakeDTO` | `Promise<Booking>` | Custodian scans pass; atomically logs `before` condition report and marks asset `checked_in`. |
-| **`verifyCheckOut`**| `dto: VerifyHandshakeDTO` | `Promise<Booking>` | Custodian scans return pass; atomically logs `after` condition report and transitions to `returned`. Auto-flags incident if damaged. |
-| **`markOverdueBookings`** | *none* | `Promise<number>` | Maintenance sweep: transitions checked_in bookings past end_time to `overdue` while retaining active custody protection. |
-| **`getBookingById`** | `id: string` | `Promise<Booking \| null>` | Retrieves booking with full joins (resource, org, profiles, condition reports, incidents). |
-| **`fetchUserBookings`**| `userId?: string` | `Promise<Booking[]>` | Retrieves reservations submitted by seeker (defaults to authenticated user). |
-| **`fetchOwnerBookings`**| `ownerId?: string` | `Promise<Booking[]>` | Retrieves all booking requests for assets managed by owner. |
-| **`getBookingTimeline`**| `bookingId: string` | `Promise<{ booking, conditionReports, incidents, auditLogs }>` | Complete audit and condition timeline for compliance and dispute resolution. |
+| **`request_booking`** | `p_resource_id UUID`<br>`p_start_time TIMESTAMPTZ`<br>`p_end_time TIMESTAMPTZ`<br>`p_purpose TEXT` | `public.bookings` (ROW) | `authenticated, service_role`<br>Requester identity derived strictly from `auth.uid()`. |
+| **`approve_booking`** | `p_booking_id UUID` | `public.bookings` (ROW) | `authenticated, service_role`<br>Caller must be resource owner or platform administrator (`is_admin()`). |
+| **`reject_booking`** | `p_booking_id UUID`<br>`p_rejection_reason TEXT` | `public.bookings` (ROW) | `authenticated, service_role`<br>Caller must be resource owner or platform administrator (`is_admin()`). |
+| **`waitlist_booking`**| `p_booking_id UUID` | `public.bookings` (ROW) | `authenticated, service_role`<br>Caller must be resource owner or platform administrator (`is_admin()`). |
+| **`cancel_booking`** | `p_booking_id UUID` | `public.bookings` (ROW) | `authenticated, service_role`<br>Caller must be requester (`auth.uid() = requester_id`), owner, or admin. |
+| **`generate_booking_pass`** | `p_booking_id UUID`<br>`p_token_type TEXT` | `JSONB` | `authenticated, service_role`<br>**STRICT**: Caller must be booking requester (`auth.uid() = requester_id`) or admin. |
+| **`verify_check_in`** | `p_raw_token TEXT`<br>`p_condition_status TEXT`<br>`p_condition_notes TEXT DEFAULT NULL`<br>`p_image_url TEXT DEFAULT NULL` | `public.bookings` (ROW) | `authenticated, service_role`<br>Caller must be resource custodian/owner or platform administrator. |
+| **`verify_check_out`**| `p_raw_token TEXT`<br>`p_condition_status TEXT`<br>`p_condition_notes TEXT DEFAULT NULL`<br>`p_image_url TEXT DEFAULT NULL` | `public.bookings` (ROW) | `authenticated, service_role`<br>Caller must be resource custodian/owner or platform administrator. |
+| **`mark_overdue_bookings`** | *none* | `INTEGER` | **`service_role` ONLY**<br>`REVOKE ALL FROM PUBLIC, anon, authenticated`. Internal maintenance endpoint. |
+| **`recalculate_waitlist`** | `p_resource_id UUID` | `void` | **`service_role` ONLY**<br>`REVOKE ALL FROM PUBLIC, anon, authenticated`. Internal queue engine helper. |
 
 ---
 
-## 2. Usage Examples in React Components
+### 2.2 Reconciled Pass Generation & Handshake Return Types
 
-### 2.1 Fetching Resources with Filters (Catalogue / Discovery)
+#### A. Pass Generation Response (`generate_booking_pass`)
+The RPC returns a single JSON object. To guarantee full frontend compatibility with both `token` and `raw_token` accessors, the response carries both fields symmetrically:
 
-```typescript
-import { useState, useEffect } from 'react';
-import { listResources } from '@/services/resources';
-import type { Resource, ResourceFilters } from '@/types/domain';
-
-export function useResourceCatalogue(filters: ResourceFilters) {
-  const [resources, setResources] = useState<Resource[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let isMounted = true;
-    setLoading(true);
-
-    listResources(filters)
-      .then((data) => {
-        if (isMounted) {
-          setResources(data);
-          setError(null);
-        }
-      })
-      .catch((err) => {
-        if (isMounted) setError(err.message);
-      })
-      .finally(() => {
-        if (isMounted) setLoading(false);
-      });
-
-    return () => { isMounted = false; };
-  }, [filters.query, filters.category, filters.resource_type, filters.available_only]);
-
-  return { resources, loading, error };
+```json
+{
+  "booking_id": "8fa1f456-2e8b-4a52-b883-7c2299dfa991",
+  "token_type": "check_in",
+  "token": "4a7f29a0b38c4591e469273f5a04c107e0349a17498c8c5025f1610e20608fa8",
+  "raw_token": "4a7f29a0b38c4591e469273f5a04c107e0349a17498c8c5025f1610e20608fa8",
+  "expires_at": "2026-11-05T10:45:00.000Z"
 }
 ```
 
-### 2.2 Registering Equipment with Image Upload (Owner Flow)
+- **Frontend Interface:** `BookingPassResponse` (`src/types/domain.ts`)
+- **Single-Use Hashing:** Token is generated via `extensions.gen_random_bytes(32)`. Only `extensions.digest(token, 'sha256')` is persisted in `public.booking_access_tokens`. The plaintext token is never stored.
 
-```typescript
-import { createResource, uploadResourceImage } from '@/services/resources';
-import type { CreateResourceDTO } from '@/types/domain';
+#### B. Verification Return Type (`verify_check_in` & `verify_check_out`)
+Both verification endpoints return the complete updated `public.bookings` row (`RETURNS public.bookings`), matching the frontend TypeScript `Promise<Booking>`.
 
-async function handleNewEquipmentSubmit(
-  formData: CreateResourceDTO,
-  imageFile: File | null
-) {
-  try {
-    let imageUrl = formData.image_url;
-
-    // 1. Upload image to Supabase Storage if selected
-    if (imageFile) {
-      imageUrl = await uploadResourceImage(imageFile, formData.organization_id);
-    }
-
-    // 2. Insert resource record
-    const created = await createResource({
-      ...formData,
-      image_url: imageUrl,
-    });
-
-    console.log('Resource created successfully:', created.id);
-    return created;
-  } catch (err: any) {
-    console.error('Failed to create resource:', err.message);
-    throw err;
-  }
-}
-```
-
-### 2.3 Checking Eligibility Before Booking
-
-```typescript
-import { checkResourceEligibility } from '@/services/resources';
-
-async function verifyBookingPrerequisites(resourceId: string) {
-  const result = await checkResourceEligibility(resourceId);
-
-  if (!result.eligible) {
-    alert(`Cannot reserve: ${result.reasons.join(', ')}`);
-    return false;
-  }
-
-  if (result.checks.trainingRequired) {
-    // Show safety clearance confirmation dialog
-    console.warn('Note: This resource requires verified training');
-  }
-
-  return true;
-}
-```
+- **Frontend Parameter Alignment:** The frontend DTO `VerifyHandshakeDTO` parameters map 1:1 to the PostgreSQL RPC arguments:
+  ```typescript
+  // Frontend invocation in src/services/bookings.ts
+  const { data, error } = await supabase.rpc('verify_check_in', {
+    p_raw_token: dto.raw_token.trim(),
+    p_condition_status: dto.condition_status,
+    p_condition_notes: dto.condition_notes?.trim() || null,
+    p_image_url: dto.image_url?.trim() || null,
+  });
+  ```
+- **Returned Row Fields:**
+  `id`, `resource_id`, `requester_id`, `start_time`, `end_time`, `purpose`, `status`, `approved_by`, `rejection_reason`, `waitlist_position`, `created_at`, `updated_at`.
+- **UI State Benefit:** Eliminates secondary queries—the caller receives the updated `Booking` model in the RPC response and immediately synchronizes local React state.
 
 ---
 
-## 3. Storage Bucket: `resource-images`
+## 3. Active Custody Protection & Concurrency Architecture
 
-ResourceLoop uses Supabase Storage for equipment and laboratory imagery.
+### 3.1 Unreturned Asset Approval Lockout Invariant
+ResourceLoop enforces strict **active physical custody protection**:
+> **Invariant:** If a resource currently has ANY unreturned booking in `checked_in` or `overdue` status, **ALL new reservation approvals for that resource are blocked** until physical return and inspection are completed via `verify_check_out()`.
 
-- **Bucket Name:** `resource-images`
-- **Access Level:** Public read access (`public: true`).
-- **Upload Restrictions:**
-  - Authenticated users with `role IN ('owner', 'admin')`.
-  - Max file size: **5 MB**.
-  - Permitted MIME types: `image/jpeg`, `image/png`, `image/webp`. (SVG and GIF are restricted for security against script injection / XSS).
-- **Path Convention:** `<organization_id>/<timestamp>-<random_key>.<ext>`
-- **Deletions:** Restricted to the asset uploader or platform administrators.
+- **Elapsed Time Does Not Grant Release:** Even if an ongoing session's scheduled `end_time` has elapsed, physical possession remains with the borrower until `verify_check_out` executes.
+- **Enforcement Implementation:**
+  Inside `public.approve_booking()`:
+  ```sql
+  -- Acquire shared resource custody lock
+  PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_booking.resource_id::text));
+
+  -- Active custody lockout check
+  IF EXISTS (
+      SELECT 1 FROM public.bookings
+      WHERE resource_id = v_booking.resource_id
+        AND id <> v_booking.id
+        AND status IN ('checked_in', 'overdue')
+  ) THEN
+      RAISE EXCEPTION 'Active custody conflict: Equipment is currently in active possession of another borrower (status: checked_in or overdue). New reservations cannot be approved until physical checkout and return inspection are completed.'
+      USING ERRCODE = 'P0001';
+  END IF;
+  ```
+
+### 3.2 Shared Resource Custody Advisory Locks
+To eliminate race conditions between concurrent handshakes, approvals, and automated background jobs, all custody-altering procedures acquire a shared PostgreSQL transaction-level advisory lock:
+```sql
+PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || resource_id::text));
+```
+This lock is held across the entire transaction in:
+1. **`approve_booking`**: Prevents approving a reservation while an unreturned asset is being checked in or checked out.
+2. **`verify_check_in`**: Guarantees serial execution of check-in handshakes; prevents two concurrent scans from both gaining custody.
+3. **`verify_check_out`**: Serializes return inspection and condition reporting before releasing custody (`status = 'returned'`).
+4. **`mark_overdue_bookings`**: Prevents status transitions while a custodian is actively scanning or returning the asset.
 
 ---
 
-## 4. Booking Lifecycle & State Machine
+## 4. Waitlist Queue Semantics & Chained Overlaps
+
+### 4.1 Connected Interval Cluster Semantics
+In real laboratory environments, reservations often involve non-identical, partially overlapping, or chained time windows. ResourceLoop structures the waitlist queue through **Connected Interval Clusters**:
+
+1. **Connected Component Grouping:**
+   Two waitlisted requests belong to the same cluster if their time windows directly overlap (`tstzrange && tstzrange`) OR if they are connected through an unbroken chain of overlapping waitlisted intervals (e.g. Request A overlaps B, and B overlaps C).
+2. **Deterministic FIFO Ranking:**
+   Within each connected cluster for a resource, waitlisted requests are ranked strictly sequentially (`waitlist_position = 1, 2, 3...`) ordered by `(created_at ASC, id ASC)`.
+3. **Cluster Independence:**
+   Non-overlapping intervals (e.g. Monday 10:00-12:00 vs Friday 14:00-16:00) form distinct, independent clusters. Each cluster maintains its own independent queue starting at position 1.
+4. **Compaction on Cancellation:**
+   When an approved or waitlisted booking is cancelled or rejected, `public.recalculate_waitlist(resource_id)` dynamically re-evaluates the connected clusters and compacts remaining requests sequentially without gaps.
+
+### 4.2 Strict FIFO Enforcement on Approval
+To maintain fairness and prevent queue jumping:
+- **Waitlisted Approval Rule:** An owner or administrator **cannot approve** a waitlisted booking if there exists another earlier-submitted waitlisted booking on that resource whose scheduled interval overlaps with the candidate.
+- **Pending Approval Rule:** An owner **cannot approve** a newly submitted `pending` booking if an earlier `waitlisted` booking exists for an overlapping timeframe.
+- **Violation Outcome:** Throws exception with code `P0001` (`FIFO fairness violation: Earlier waitlisted request exists for this overlapping timeframe. Waitlisted requests must be approved in FIFO order.`).
+
+---
+
+## 5. Booking Lifecycle & State Machine
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending: Seeker Submits Request (Atomic Eligibility Check)
+    [*] --> pending: Seeker Submits Request (request_booking)
     
-    pending --> approved: Owner / Admin Approves (Exclusion Locked)
-    pending --> rejected: Owner / Admin Rejects (Reason Mandatory)
-    pending --> waitlisted: Queued by Owner (Deterministic FIFO Assigned)
-    pending --> cancelled: Seeker Cancels Prior to Start
+    pending --> approved: Owner Approves (approve_booking: Lock + Custody + FIFO Checked)
+    pending --> rejected: Owner Rejects (reject_booking: Reason Mandatory)
+    pending --> waitlisted: Queued by Owner (waitlist_booking: Deterministic Cluster FIFO Assigned)
+    pending --> cancelled: Seeker Cancels (cancel_booking: Allowed Prior to Start)
 
-    waitlisted --> approved: Owner Promotes & Approves
-    waitlisted --> rejected: Owner Rejects
-    waitlisted --> cancelled: Seeker Withdraws (Queue Recalculated)
+    waitlisted --> approved: Owner Promotes in FIFO Order (approve_booking)
+    waitlisted --> rejected: Owner Rejects (reject_booking: Queue Compacted)
+    waitlisted --> cancelled: Seeker Withdraws (cancel_booking: Queue Compacted)
 
-    approved --> checked_in: Owner Scans Seeker Token + Before Report
-    approved --> cancelled: Seeker / Owner Cancels Prior to Check-in
+    approved --> checked_in: Custodian Scans QR + Before Report (verify_check_in)
+    approved --> cancelled: Seeker / Owner Cancels Prior to Check-in (cancel_booking)
     
-    checked_in --> returned: Owner Scans Return Token + After Report
-    checked_in --> overdue: now() > end_time without Check-out
+    checked_in --> returned: Custodian Scans Return QR + After Report (verify_check_out)
+    checked_in --> overdue: Session End Passed without Return (mark_overdue_bookings)
     
-    overdue --> returned: Late Return Handshake (+ Incident Flag if Damaged)
+    overdue --> returned: Late Return Handshake (verify_check_out: Custody Released)
 
     rejected --> [*]
     cancelled --> [*]
     returned --> [*]
 ```
 
-### State Definitions:
-1. **`pending`**: Initial state upon submission. Eligibility and usage limits verified atomically.
-2. **`waitlisted`**: Queued request with deterministic FIFO queue position (`waitlist_position`).
-3. **`approved`**: Reservation confirmed by owner. Protected against scheduled overlaps via PostgreSQL `btree_gist` exclusion constraint.
-4. **`checked_in`**: Physical custody transferred. Verified via single-use QR handshake + mandatory pre-inspection report.
-5. **`returned`**: Physical custody restored. Verified via return QR handshake + mandatory post-inspection report.
-6. **`overdue`**: Session time elapsed without check-out. Active custody protection remains active—no new session can start while equipment is unreturned.
-7. **`cancelled` / `rejected`**: Terminal closed states. Invalidate unused access tokens and recalculate waitlist queue.
+---
 
-### Waitlist Queue Semantics & Window Overlaps:
-- **Interval-Aware Grouping**: Waitlists are evaluated dynamically per resource and overlapping time interval (`tstzrange(start_time, end_time, '[)') && tstzrange(cand_start, cand_end, '[)')`).
-- **Cluster Isolation**: Queue positions are completely independent across non-overlapping intervals. Two requests scheduled for distinct days or non-overlapping hours each maintain their own independent position (e.g. both can hold `waitlist_position = 1`).
-- **Partial Overlap Resolution**: Non-identical intervals that intersect (e.g. 10:00 - 14:00 vs 12:00 - 16:00) compete for the shared time slice; FIFO priority is determined strictly by submission order (`created_at ASC, id ASC`).
-- **Transactional Serialization**: Queue additions and compaction are protected against concurrency races via advisory transaction locks (`pg_advisory_xact_lock(hashtext('waitlist:' || resource_id))`).
-- **Compaction**: When an approved booking is cancelled or rejected, `recalculate_waitlist(resource_id)` re-indexes remaining waitlisted bookings in that time-window cluster sequentially (`1, 2, 3...`) using the exact same overlapping-window query.
-- **Manual Promotion Policy**: Promotion from the waitlist is **strictly manual with custodian review**. Automated promotion into `approved` state is prohibited to avoid surprise confirmations and protect lab scheduling integrity. When a slot is vacated, the seeker at `waitlist_position = 1` is queued for review. The asset owner or platform administrator promotes the candidate by executing `approve_booking(booking_id)`, which atomically verifies eligibility, checks for conflicting active custody, transitions the booking to `approved`, and clears `waitlist_position` to `NULL`.
+## 6. Security & Extension Configuration
+
+### 6.1 Extension Schema Placement (`extensions`)
+- Supabase hosts cryptographic and indexing extensions in the dedicated `extensions` schema.
+- Migration `004_booking_engine.sql` ensures `extensions` exists and installs:
+  ```sql
+  CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA extensions;
+  CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+  ```
+- If `pgcrypto` or `btree_gist` was previously installed into `public` by legacy migrations, Migration 004 automatically relocates them to `extensions` via `ALTER EXTENSION ... SET SCHEMA extensions;`.
+- Extension functions (`digest`, `gen_random_bytes`, `encode`) resolve safely across all RPCs under `SET search_path = pg_catalog, extensions, pg_temp;`.
 
 ---
 
-## 5. QR Access Token Security & Verification Flow
+## 7. Stage 3 Verification Suite & Integration Test Outcomes
 
-1. **Opaque High-Entropy Tokens**:
-   - The QR code carries ONLY a 256-bit cryptographically random hex token (`crypto.randomBytes(32)`).
-   - Zero metadata (no booking ID, user ID, resource ID, or timestamps) is encoded in the QR string.
-2. **Database Hashing**:
-   - The database stores **exclusively the SHA-256 hash** of the token in `public.booking_access_tokens`.
-   - Ordinary users have zero direct `SELECT` access to `booking_access_tokens`.
-3. **Physical Custodian Handshake**:
-   - **Generation**: Seeker calls `generateBookingPass(bookingId, 'check_in')` when approved to display the QR pass.
-   - **Scanning**: Authenticated Resource Owner / Lab Custodian scans the QR pass using their device camera.
-   - **Verification**: Owner calls `verifyCheckIn({ raw_token, condition_status, condition_notes, image_url })`.
-   - The server computes `sha256(raw_token)` to locate the booking record, verifies owner authorization and active timeframe, sets `used_at = now()`, inserts the `before` condition report, and marks the booking `checked_in`.
-   - **Replay Protection**: Single-use enforcement guarantees any re-scan is rejected.
-4. **Return & Incident Escalation**:
-   - Return follows the same flow with `verifyCheckOut(...)`.
-   - If `condition_status IN ('damaged', 'faulty')`, an open incident is automatically registered in `public.incidents` for administrative and custodian review. Automated penalties are prohibited; human review governs all resolution.
+The test suite in `supabase/tests/booking_engine_verification.sql` validates all 9 backend engine requirements against a clean fixture environment:
 
----
-
-## 6. Supabase Setup & Demo Accounts
-
-### 6.1 Applying Migration 002 (Non-destructive)
-1. Open the Supabase Dashboard: **SQL Editor**.
-2. Run `supabase/migrations/002_resource_management.sql`.
-   - The script creates or updates the `resource-images` bucket safely via `ON CONFLICT (id) DO UPDATE`.
-   - No existing storage objects or records are dropped or altered destructively.
-
-### 6.2 Creating Real Authenticated Demo Accounts
-To test all roles with real Supabase Auth:
-1. Sign up users via the app's Signup Page or Supabase Auth Dashboard (**Authentication > Users > Add user**).
-2. To assign an **`owner`** or **`admin`** role, run this in the Supabase **SQL Editor**:
-```sql
--- Promote a user to owner and link to an institution
-UPDATE public.profiles
-SET role = 'owner', organization_id = '11111111-1111-1111-1111-111111111111'
-WHERE email = 'user-email@institution.edu';
-
--- Promote a user to platform admin
-UPDATE public.profiles
-SET role = 'admin'
-WHERE email = 'admin-email@institution.edu';
-```
+| Test ID | Requirement Tested | Expected Invariant | Status |
+| :--- | :--- | :--- | :--- |
+| **TEST 1** | Scheduled Overlap Exclusion | GiST exclusion constraint blocks overlapping approved intervals on the same resource (`SQLSTATE 23P01`). | **PASSED** |
+| **TEST 2** | Active Custody Protection | An unreturned `checked_in` or `overdue` booking strictly blocks new approvals even if scheduled end time has passed (`SQLSTATE P0001`). | **PASSED** |
+| **TEST 3** | Shared Custody Lock & Check-in Recheck | Serializes concurrent check-in requests via `resource_custody` advisory lock; rechecks under lock to prevent double-custody. | **PASSED** |
+| **TEST 4** | Direct Table Mutation Lockdown | Direct client `INSERT`, `UPDATE`, `DELETE` on `public.bookings` is strictly revoked from `anon` and `authenticated`. | **PASSED** |
+| **TEST 5** | Seeker-Only QR Pass Generation | Only the booking's seeker can generate passes; returns `{ booking_id, token_type, token, raw_token, expires_at }`; stores only SHA-256 hash. | **PASSED** |
+| **TEST 6** | Single-Use Replay Attack Prevention | Access tokens record `used_at = now()`. Re-scan attempts are rejected immediately. | **PASSED** |
+| **TEST 7** | Chained Interval FIFO Queue & Compaction | Chained overlapping intervals (A $\leftrightarrow$ B $\leftrightarrow$ C) receive sequential positions 1, 2, 3; independent interval D retains position 1; cancellation triggers seamless compaction. | **PASSED** |
+| **TEST 8** | FIFO Enforcement on Approval | Attempting to approve an overlapping waitlisted candidate out of FIFO order throws `FIFO fairness violation` (`SQLSTATE P0001`). | **PASSED** |
+| **TEST 9** | Return Verification & Incident Escalation | Return handshake releases custody; damaged return automatically opens incident and records immutable audit log. `mark_overdue_bookings` acquires shared custody lock. | **PASSED** |
