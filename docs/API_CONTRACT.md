@@ -121,6 +121,144 @@ import {
 
 ---
 
+### 1.5 Donations & Surplus Asset Service (`src/services/donations.ts`)
+
+```typescript
+import {
+  createDonationListing,
+  listDonationListings,
+  requestDonation,
+  acceptDonation,
+  rejectDonation,
+} from '../services/donations';
+```
+
+#### Function Specifications:
+
+| Function | Parameters | Return Type | Description |
+| :--- | :--- | :--- | :--- |
+| **`createDonationListing`** | `dto: CreateDonationDTO` | `Promise<Resource>` | Creates permanent surplus equipment listing with condition and terms. Restricted to owners/admins. |
+| **`listDonationListings`** | `filters?: ResourceFilters` | `Promise<Resource[]>` | Lists available equipment flagged for institutional donation/transfer. |
+| **`requestDonation`** | `dto: RequestDonationDTO` | `Promise<Booking>` | Submits institutional donation claim through the unified booking engine. |
+| **`acceptDonation`** | `bookingId: string` | `Promise<Booking>` | Approves claim, marks resource as transferred/unavailable, logs audit event, notifies recipient. |
+| **`rejectDonation`** | `bookingId: string, reason: string` | `Promise<Booking>` | Rejects claim request with mandatory reason. |
+
+---
+
+### 1.6 Incident & Penalty Human Review Service (`src/services/incidents.ts`)
+
+```typescript
+import {
+  reportIncident,
+  getIncidents,
+  getIncidentById,
+  updateIncidentStatus,
+  reviewPenalty,
+} from '../services/incidents';
+```
+
+#### Function Specifications:
+
+| Function | Parameters | Return Type | Description |
+| :--- | :--- | :--- | :--- |
+| **`reportIncident`** | `dto: CreateIncidentDTO` | `Promise<Incident>` | Reports safety hazard, damage, or late return against an asset or booking. |
+| **`getIncidents`** | `filters?: IncidentFilters` | `Promise<Incident[]>` | Queries incidents with joins to booking, resource, and reporting researcher. |
+| **`getIncidentById`** | `id: string` | `Promise<Incident \| null>` | Retrieves full incident dossier including before/after condition reports. |
+| **`updateIncidentStatus`**| `id: string, dto: ResolveIncidentDTO` | `Promise<Incident>` | Updates investigation status and attaches resolution notes. |
+| **`reviewPenalty`** | `dto: ReviewPenaltyDTO` | `Promise<Incident>` | **Human Review of Penalties**: Administrator reviews damages/delays, makes discretionary decision (`waived`, `warning`, `restitution_required`, `privilege_suspended`), audits decision, and notifies borrower. |
+
+---
+
+### 1.7 Notifications Service (`src/services/notifications.ts`)
+
+```typescript
+import {
+  getUserNotifications,
+  getUnreadNotificationCount,
+  markNotificationAsRead,
+  markAllNotificationsAsRead,
+  createNotification,
+  deleteNotification,
+} from '../services/notifications';
+```
+
+#### Function Specifications:
+
+| Function | Parameters | Return Type | Description |
+| :--- | :--- | :--- | :--- |
+| **`getUserNotifications`** | `userId?: string, limit?: number` | `Promise<Notification[]>` | Retrieves user alerts and reminders in reverse chronological order. |
+| **`getUnreadNotificationCount`** | `userId?: string` | `Promise<number>` | Fast exact head count for top navigation notification badge. |
+| **`markNotificationAsRead`** | `notificationId: string` | `Promise<void>` | Marks specific notification as read. |
+| **`markAllNotificationsAsRead`** | `userId?: string` | `Promise<void>` | Bulk dismisses all unread alerts for current user. |
+| **`createNotification`** | `userId: string, title: string, message: string, linkUrl?: string` | `Promise<Notification>` | Provisions an in-app alert. |
+| **`deleteNotification`** | `notificationId: string` | `Promise<void>` | Deletes notification record. |
+
+---
+
+### 1.8 Compliance Audit & History Service (`src/services/audit.ts`)
+
+```typescript
+import {
+  getAuditLogs,
+  getResourceHistory,
+  getUserHistory,
+  getInstitutionalImpactMetrics,
+} from '../services/audit';
+```
+
+#### Function Specifications:
+
+| Function | Parameters | Return Type | Description |
+| :--- | :--- | :--- | :--- |
+| **`getAuditLogs`** | `filters?: AuditLogFilters` | `Promise<AuditLog[]>` | Platform audit trail query (restricted to administrators via RLS). |
+| **`getResourceHistory`** | `resourceId: string` | `Promise<ResourceHistory>` | Complete operational history for an asset (all bookings, condition reports, incidents). |
+| **`getUserHistory`** | `userId: string` | `Promise<UserHistory>` | Complete researcher track record (reservations, completion rate, incident history). |
+| **`getInstitutionalImpactMetrics`**| *none* | `Promise<ImpactMetrics>` | Aggregates live Supabase data: total completed bookings, sharing hours, active assets, partner institutions, avoided CapEx ($), and avoided CO2 (kg). |
+
+---
+
+### 1.9 Campus Governance & Administration Service (`src/services/admin.ts`)
+
+```typescript
+import {
+  listAllOrganizations,
+  verifyOrganization,
+  listAllUsers,
+  updateUserRole,
+  getPlatformOverview,
+} from '../services/admin';
+```
+
+#### Function Specifications:
+
+| Function | Parameters | Return Type | Description |
+| :--- | :--- | :--- | :--- |
+| **`listAllOrganizations`** | `status?: OrganizationVerificationStatus` | `Promise<Organization[]>` | Administrative overview of all enrolled institutional entities. |
+| **`verifyOrganization`** | `organizationId: string, status: 'verified' \| 'rejected'` | `Promise<Organization>` | Admin approval/rejection of institution enrollment; logs to audit trail. |
+| **`listAllUsers`** | `role?: UserRole` | `Promise<Profile[]>` | Governance directory of all registered researchers and managers. |
+| **`updateUserRole`** | `userId: string, newRole: UserRole` | `Promise<Profile>` | Assigns user access role ('seeker', 'owner', 'admin') adhering to trigger guard. |
+| **`getPlatformOverview`** | *none* | `Promise<{ ... counts }>` | Central telemetry overview with real counts across all core tables. |
+
+---
+
+### 1.10 Condition Reports Service (`src/services/conditionReports.ts`)
+
+```typescript
+import {
+  getConditionReportsByBooking,
+  createConditionReport,
+} from '../services/conditionReports';
+```
+
+#### Function Specifications:
+
+| Function | Parameters | Return Type | Description |
+| :--- | :--- | :--- | :--- |
+| **`getConditionReportsByBooking`** | `bookingId: string` | `Promise<ConditionReport[]>` | Retrieves pre-session ('before') and post-return ('after') inspection records. |
+| **`createConditionReport`** | `dto: CreateConditionReportDTO` | `Promise<ConditionReport>` | Files standalone condition report with image evidence and health ratings. |
+
+---
+
 ## 2. PostgreSQL RPC Contract & Backend Specification
 
 All booking mutations are encapsulated in PostgreSQL `SECURITY DEFINER` functions located in the `public` schema with explicit search path configuration:
@@ -180,6 +318,21 @@ Both verification endpoints return the complete updated `public.bookings` row (`
 - **Returned Row Fields:**
   `id`, `resource_id`, `requester_id`, `start_time`, `end_time`, `purpose`, `status`, `approved_by`, `rejection_reason`, `waitlist_position`, `created_at`, `updated_at`.
 - **UI State Benefit:** Eliminates secondary queries—the caller receives the updated `Booking` model in the RPC response and immediately synchronizes local React state.
+
+---
+
+### 2.3 PostgreSQL Error Code & Exception Behavior Dictionary
+
+Every backend RPC raises standard PostgreSQL exceptions with deterministic `ERRCODE`s so Person 2 can handle errors cleanly on the frontend:
+
+| SQLSTATE Code | Error Type | Trigger Conditions | Recommended UI Handling |
+| :--- | :--- | :--- | :--- |
+| **`42501`** | `insufficient_privilege` | • Unauthenticated caller (`auth.uid() IS NULL`)<br>• Seeker attempting owner-only approval<br>• Non-seeker attempting to generate QR pass<br>• Non-admin attempting role escalation | Display toast: *"Unauthorized action. You do not have permission to execute this operation."* |
+| **`P0001`** | `raise_exception` | • **Active Custody Lockout:** Unreturned checked_in/overdue asset blocks new approval<br>• **FIFO Violation:** Bypassing earlier waitlisted candidate in cluster<br>• **State Conflict:** Calling check-in when booking is not `approved`<br>• **Token Expiration / Used:** Scanning an expired or already-used QR pass | Inspect `error.message` and display specific context alert (e.g. *"Equipment currently in active borrower possession"*). |
+| **`P0002`** | `no_data_found` | • Target `p_booking_id` does not exist<br>• `p_raw_token` does not match any valid hash | Display: *"Reservation or access pass not found."* |
+| **`22023`** | `invalid_parameter_value` | • Invalid `token_type` (must be `check_in` or `check_out`)<br>• Start time in past or `end_time <= start_time`<br>• Missing rejection reason (< 3 chars) | Inline form validation highlight on inputs. |
+| **`23P01`** | `exclusion_violation` | • Concurrent double-booking blocked by PostgreSQL GiST exclusion constraint (`exclude_overlapping_approved_bookings`) | Display: *"Time slot conflict: This equipment has already been approved for another session during this interval."* |
+| **`23505`** | `unique_violation` | • Submitting a duplicate condition report for the same stage (`unique_booking_report_stage`) | Display: *"A condition report has already been filed for this session stage."* |
 
 ---
 
