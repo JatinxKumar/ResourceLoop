@@ -17,6 +17,8 @@ import { ResourceDiscoveryPage } from '@/pages/ResourceDiscoveryPage'
 import { ResourceDetailPage } from '@/pages/ResourceDetailPage'
 import { MyBookingsPage } from '@/pages/MyBookingsPage'
 import { OwnerDashboardPage } from '@/pages/OwnerDashboardPage'
+import { OwnerBookingsPage } from '@/pages/OwnerBookingsPage'
+import { CheckInOutPage } from '@/pages/CheckInOutPage'
 import { AdminDashboardPage } from '@/pages/AdminDashboardPage'
 import { ImpactDashboardPage } from '@/pages/ImpactDashboardPage'
 
@@ -91,6 +93,22 @@ export const App: React.FC = () => {
               element={
                 <ProtectedRoute allowedRoles={['owner', 'admin']}>
                   <OwnerDashboardPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/owner/bookings"
+              element={
+                <ProtectedRoute allowedRoles={['owner', 'admin']}>
+                  <OwnerBookingsPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/checkin"
+              element={
+                <ProtectedRoute allowedRoles={['seeker', 'owner', 'admin']}>
+                  <CheckInOutPage />
                 </ProtectedRoute>
               }
             />
