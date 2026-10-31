@@ -12,15 +12,15 @@ import {
   Building,
   AlertTriangle,
   ExternalLink,
+  Ban,
 } from 'lucide-react'
-import { fetchOwnerBookings, updateBookingStatus } from '@/hooks/useBookings'
+import { fetchOwnerBookings, approveBooking, rejectBooking } from '@/hooks/useBookings'
 import { useAuth } from '@/contexts/AuthContext'
 import { StatusBadge } from '@/components/common/StatusBadge'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { EmptyState } from '@/components/common/EmptyState'
 import { EligibilityPanel } from '@/components/bookings/EligibilityPanel'
-import { IncidentReportModal } from '@/components/bookings/IncidentReportModal'
-import type { Booking, BookingStatus, CreateIncidentDTO } from '@/types/domain'
+import type { Booking } from '@/types/domain'
 
 type OwnerFilterTab = 'all' | 'pending' | 'approved' | 'active' | 'completed'
 
@@ -34,9 +34,6 @@ export const OwnerBookingsPage: React.FC = () => {
   const [processingId, setProcessingId] = useState<string | null>(null)
   const [rejectionReason, setRejectionReason] = useState('')
   const [rejectingId, setRejectingId] = useState<string | null>(null)
-
-  // Incident report modal state
-  const [incidentBooking, setIncidentBooking] = useState<Booking | null>(null)
 
   const loadBookings = useCallback(async () => {
     if (!user) return
@@ -81,7 +78,7 @@ export const OwnerBookingsPage: React.FC = () => {
     setProcessingId(bookingId)
     setActionFeedback(null)
     try {
-      await updateBookingStatus(bookingId, 'approved')
+      await approveBooking(bookingId)
       setActionFeedback({ type: 'success', text: 'Booking approved.' })
       await loadBookings()
     } catch (err: unknown) {
@@ -100,7 +97,7 @@ export const OwnerBookingsPage: React.FC = () => {
     setProcessingId(bookingId)
     setActionFeedback(null)
     try {
-      await updateBookingStatus(bookingId, 'rejected', rejectionReason.trim())
+      await rejectBooking(bookingId, rejectionReason.trim())
       setActionFeedback({ type: 'success', text: 'Booking declined.' })
       setRejectingId(null)
       setRejectionReason('')
@@ -111,11 +108,6 @@ export const OwnerBookingsPage: React.FC = () => {
     } finally {
       setProcessingId(null)
     }
-  }
-
-  const handleIncidentSubmit = async (_dto: CreateIncidentDTO) => {
-    // Will be wired to backend RPC once API_CONTRACT.md is approved
-    throw new Error('Incident report submission requires backend integration.')
   }
 
   const formatDate = (iso: string) =>
@@ -281,6 +273,14 @@ export const OwnerBookingsPage: React.FC = () => {
                 </div>
               )}
 
+              {/* Incident report — unavailable until backend operation is approved */}
+              {(booking.status === 'checked_in' || booking.status === 'approved') && (
+                <div className="flex items-center gap-2 text-xs text-slate-400 bg-slate-50 border border-dashed border-slate-200 rounded-lg p-2.5 mb-4">
+                  <Ban className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span>Incident reporting will be available once the backend operation is deployed.</span>
+                </div>
+              )}
+
               {/* Actions */}
               <div className="pt-3 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100">
                 <Link
@@ -292,17 +292,6 @@ export const OwnerBookingsPage: React.FC = () => {
                 </Link>
 
                 <div className="flex items-center gap-2 flex-wrap">
-                  {/* Incident report button — available for active bookings */}
-                  {(booking.status === 'checked_in' || booking.status === 'approved') && (
-                    <button
-                      onClick={() => setIncidentBooking(booking)}
-                      className="px-3 py-1.5 text-xs font-medium text-amber-700 border border-amber-200 bg-amber-50 rounded-lg hover:bg-amber-100 transition-colors flex items-center gap-1"
-                    >
-                      <AlertTriangle className="w-3.5 h-3.5" />
-                      Report Incident
-                    </button>
-                  )}
-
                   {/* Pending actions: approve / reject */}
                   {booking.status === 'pending' && (
                     <>
@@ -364,17 +353,6 @@ export const OwnerBookingsPage: React.FC = () => {
           description="There are no booking requests matching this filter."
           actionLabel="View All"
           onAction={() => setFilterTab('all')}
-        />
-      )}
-
-      {/* Incident Report Modal */}
-      {incidentBooking && (
-        <IncidentReportModal
-          isOpen={!!incidentBooking}
-          bookingId={incidentBooking.id}
-          resourceTitle={incidentBooking.resource?.title}
-          onSubmit={handleIncidentSubmit}
-          onClose={() => setIncidentBooking(null)}
         />
       )}
     </div>

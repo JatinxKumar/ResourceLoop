@@ -164,11 +164,7 @@ export const MyBookingsPage: React.FC = () => {
         <QrCheckinModal
           isOpen={!!selectedBookingForPass}
           onClose={() => setSelectedBookingForPass(null)}
-          resourceTitle={selectedBookingForPass.resource?.title || 'Institutional Resource'}
-          bookingCode={`RL-${selectedBookingForPass.id.substring(0, 8).toUpperCase()}`}
-          tokenData={`RESOURCELOOP:${selectedBookingForPass.id}:${selectedBookingForPass.requester_id}`}
-          startDate={new Date(selectedBookingForPass.start_time).toLocaleDateString()}
-          endDate={new Date(selectedBookingForPass.end_time).toLocaleDateString()}
+          booking={selectedBookingForPass}
         />
       )}
     </div>

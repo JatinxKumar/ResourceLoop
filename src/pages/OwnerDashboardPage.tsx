@@ -26,7 +26,7 @@ import {
   uploadResourceImage,
   getOrganizations
 } from '@/hooks/useResources'
-import { fetchOwnerBookings, updateBookingStatus } from '@/hooks/useBookings'
+import { fetchOwnerBookings, approveBooking, rejectBooking } from '@/hooks/useBookings'
 import { useAuth } from '@/contexts/AuthContext'
 import { supabase } from '@/lib/supabase'
 import { StatusBadge } from '@/components/common/StatusBadge'
@@ -324,17 +324,21 @@ export const OwnerDashboardPage: React.FC = () => {
     }
   }
 
-  // Handle Approve / Reject Booking
+  // Handle Approve / Reject Booking via backend RPCs
   const handleBookingAction = async (bookingId: string, action: 'approved' | 'rejected') => {
     try {
-      await updateBookingStatus(bookingId, action)
+      if (action === 'approved') {
+        await approveBooking(bookingId)
+      } else {
+        await rejectBooking(bookingId, 'Declined by resource owner.')
+      }
       setFeedbackMessage({
         type: 'success',
-        text: `Booking request marked as ${action} in Supabase.`
+        text: `Booking request ${action === 'approved' ? 'approved' : 'declined'}.`
       })
       await loadOwnerData()
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : `Failed to ${action} booking.`
+      const msg = err instanceof Error ? err.message : `Failed to ${action === 'approved' ? 'approve' : 'decline'} booking.`
       setFeedbackMessage({ type: 'error', text: msg })
     }
   }

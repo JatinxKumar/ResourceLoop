@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase, isSupabaseConfigured } from '@/lib/supabase'
-import type { Booking, CreateBookingDTO, BookingStatus } from '@/types/domain'
+import type { Booking, CreateBookingDTO, BookingStatus, ConditionStatus } from '@/types/domain'
 
 /**
  * Fetch all bookings created by a specific seeker.
@@ -90,39 +90,107 @@ export async function requestBooking(dto: CreateBookingDTO): Promise<Booking> {
   return data as Booking
 }
 
+// =============================================================================
+// RPC-based booking operations (per approved backend contract)
+// =============================================================================
+
 /**
- * Approve or reject a booking (Owner action).
+ * Approve a pending booking via backend RPC.
+ * The RPC enforces ownership, status-guard, and audit logging.
  */
-export async function updateBookingStatus(
-  bookingId: string,
-  newStatus: 'approved' | 'rejected',
-  rejectionReason?: string
-): Promise<Booking> {
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('User not authenticated.')
-
-  const payload: Record<string, unknown> = {
-    status: newStatus,
-    approved_by: newStatus === 'approved' ? user.id : null,
-  }
-
-  if (rejectionReason) {
-    payload.rejection_reason = rejectionReason.trim()
-  }
-
-  const { data, error } = await supabase
-    .from('bookings')
-    .update(payload)
-    .eq('id', bookingId)
-    .select()
-    .single()
+export async function approveBooking(bookingId: string): Promise<void> {
+  const { error } = await supabase.rpc('approve_booking', {
+    p_booking_id: bookingId,
+  })
 
   if (error) {
-    console.error('Failed to update booking status:', error.message)
-    throw error
+    console.error('approve_booking RPC failed:', error.message)
+    throw new Error(error.message || 'Failed to approve booking.')
+  }
+}
+
+/**
+ * Reject a pending booking via backend RPC.
+ * The RPC enforces ownership, status-guard, and audit logging.
+ */
+export async function rejectBooking(
+  bookingId: string,
+  reason: string
+): Promise<void> {
+  const { error } = await supabase.rpc('reject_booking', {
+    p_booking_id: bookingId,
+    p_reason: reason.trim(),
+  })
+
+  if (error) {
+    console.error('reject_booking RPC failed:', error.message)
+    throw new Error(error.message || 'Failed to reject booking.')
+  }
+}
+
+/**
+ * Verify a check-in token and transition booking to checked_in.
+ * Condition report data is passed atomically with the check-in.
+ */
+export async function verifyCheckIn(
+  token: string,
+  conditionStatus?: ConditionStatus,
+  conditionNotes?: string
+): Promise<{ booking_id: string; status: string }> {
+  const { data, error } = await supabase.rpc('verify_check_in', {
+    p_token: token,
+    p_condition_status: conditionStatus || null,
+    p_condition_notes: conditionNotes || null,
+  })
+
+  if (error) {
+    console.error('verify_check_in RPC failed:', error.message)
+    throw new Error(error.message || 'Check-in verification failed.')
   }
 
-  return data as Booking
+  return data as { booking_id: string; status: string }
+}
+
+/**
+ * Verify a check-out / return token and transition booking to returned.
+ * Condition report data is passed atomically with the check-out.
+ */
+export async function verifyCheckOut(
+  token: string,
+  conditionStatus?: ConditionStatus,
+  conditionNotes?: string
+): Promise<{ booking_id: string; status: string }> {
+  const { data, error } = await supabase.rpc('verify_check_out', {
+    p_token: token,
+    p_condition_status: conditionStatus || null,
+    p_condition_notes: conditionNotes || null,
+  })
+
+  if (error) {
+    console.error('verify_check_out RPC failed:', error.message)
+    throw new Error(error.message || 'Check-out verification failed.')
+  }
+
+  return data as { booking_id: string; status: string }
+}
+
+/**
+ * Generate a custody pass token for an approved booking.
+ * Returns an opaque token to be rendered as a QR code.
+ */
+export async function generateCustodyToken(
+  bookingId: string
+): Promise<{ token: string; expires_at: string }> {
+  const { data, error } = await supabase.rpc('generate_custody_token', {
+    p_booking_id: bookingId,
+  })
+
+  if (error) {
+    console.error('generate_custody_token RPC failed:', error.message)
+    throw new Error(error.message || 'Failed to generate custody token.')
+  }
+
+  return data as { token: string; expires_at: string }
 }
 
 /**
