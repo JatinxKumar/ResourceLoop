@@ -104,8 +104,8 @@ import {
 
 | Function | Parameters | Return Type | Description |
 | :--- | :--- | :--- | :--- |
-| **`requestBooking`** | `dto: CreateBookingDTO` | `Promise<Booking>` | Atomically validates eligibility, organization verification, and usage limits, then creates pending reservation. |
-| **`approveBooking`** | `bookingId: string` | `Promise<Booking>` | Approves booking; enforces GiST scheduled overlap exclusion constraint and active custody check. |
+| **`requestBooking`** | `dto: CreateBookingDTO` | `Promise<Booking>` | **Exclusive client creation path**. Direct INSERT is revoked. Atomically validates eligibility, organization verification, availability, and usage limits (including overdue), then creates pending reservation. |
+| **`approveBooking`** | `bookingId: string` | `Promise<Booking>` | Approves booking; acquires shared resource lock, enforces precise overdue custody rule (blocks sessions starting within 24h if equipment is overdue), and enforces GiST scheduled overlap constraint. |
 | **`rejectBooking`** | `bookingId: string, rejectionReason: string` | `Promise<Booking>` | Rejects booking with mandatory explanation; recalculates waitlist. |
 | **`waitlistBooking`**| `bookingId: string` | `Promise<Booking>` | Moves request to deterministic FIFO waitlist with unique queue position. |
 | **`cancelBooking`** | `bookingId: string` | `Promise<Booking>` | Cancels reservation prior to check-in (seeker or owner/admin); recalculates waitlist. |

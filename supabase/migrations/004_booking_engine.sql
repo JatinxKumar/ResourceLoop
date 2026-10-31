@@ -1,33 +1,37 @@
 -- ==============================================================================
 -- Migration: 004_booking_engine.sql
--- Description: Stage 3 Booking & Allocation Engine (Revised)
+-- Description: Stage 3 Booking & Allocation Engine (Final Hardened Specification)
 -- 
 -- Key Highlights:
--- 1. Scheduled Overlap Prevention: Safe check of existing data before adding
+-- 1. RPC-Only Mutation Architecture: Direct INSERT, UPDATE, and DELETE privileges
+--    on public.bookings are strictly REVOKED from authenticated and anon roles.
+--    All booking creation and lifecycle state transitions must execute through
+--    designated SECURITY DEFINER RPCs.
+-- 2. Strict Search Path & Schema Qualification: All RPCs configure:
+--    SET search_path = pg_catalog, extensions, pg_temp;
+--    (public is excluded from search_path; all application tables, types, and
+--    functions are explicitly schema-qualified as public.* to prevent search-path hijacking).
+-- 3. Scheduled Overlap Prevention: Safe check of existing data before adding the
 --    no_overlapping_scheduled_bookings exclusion constraint (no unconditional drops).
--- 2. Active Custody Protection: Shared resource-level transaction locks in both
---    approve_booking() and verify_check_in(). Prevents conflicting approvals and
---    guarantees concurrent check-ins cannot both succeed while equipment is unreturned.
--- 3. Strict Deterministic FIFO Waitlist per resource/time window with transactional locking
---    and automatic queue compaction on promotion or cancellation.
--- 4. Opaque, High-Entropy QR Access Tokens: Only booking requester (seeker) can obtain
---    raw token; database stores exclusively SHA-256 hash. Zero ordinary user SELECT.
--- 5. Physical Custodian Handshake: Authenticated owner scans and validates. Single-use,
---    time-bound, and protected against replay attacks.
--- 6. State Machine Lockdown: Direct client bypass of lifecycle status is strictly blocked
---    by trigger trg_booking_state_machine_guard and RLS policies.
--- 7. Audit Logging & Human Incident Governance: Structured audit trail for all transitions
---    matching public.audit_logs schema. Automatic incident escalation for damaged returns
---    retaining human review for resolution.
--- 8. Restricted Search Path & Schema Qualification: Functions use pg_catalog, extensions,
---    public, pg_temp to safely resolve pgcrypto cryptographic functions without hijacking risks.
+-- 4. Active Custody Protection: Shared resource-level transaction lock
+--    (pg_advisory_xact_lock on resource_custody) acquired before evaluating custody.
+--    Custody state is rechecked after acquiring lock in both approve_booking() and verify_check_in().
+-- 5. Precise Overdue Custody Rule: Approvals are blocked if the asset currently has an
+--    unreturned 'overdue' booking and candidate start_time is within 24 hours of now(),
+--    or if an active 'checked_in' session's scheduled end has not yet elapsed.
+-- 6. Deterministic FIFO Waitlist: Evaluated per resource and overlapping time window
+--    using interval intersection (&&) with transactional serialization and queue compaction.
+-- 7. Seeker-Only QR Pass Generation: generate_booking_pass() strictly restricts token
+--    generation to the booking requester (auth.uid() = requester_id).
+-- 8. Audit Logging & Human Governance: Full audit trail matching public.audit_logs.
+--    Automatic damage incident flagging with human-only resolution and penalty review.
 -- ==============================================================================
 
 -- ------------------------------------------------------------------------------
 -- 1. EXTENSIONS
 -- ------------------------------------------------------------------------------
 CREATE EXTENSION IF NOT EXISTS btree_gist;
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 
 -- ------------------------------------------------------------------------------
 -- 2. SCHEMA ADDITIONS: public.bookings
@@ -111,8 +115,6 @@ DROP POLICY IF EXISTS "tokens_select_participants" ON public.booking_access_toke
 DROP POLICY IF EXISTS "tokens_admin_manage" ON public.booking_access_tokens;
 DROP POLICY IF EXISTS "tokens_admin_only" ON public.booking_access_tokens;
 
--- Only Platform Administrators or internal service roles can view token records directly.
--- Normal users must validate through verify_check_in / verify_check_out RPCs.
 CREATE POLICY "tokens_admin_only"
     ON public.booking_access_tokens
     FOR ALL
@@ -131,7 +133,7 @@ CREATE OR REPLACE FUNCTION public.recalculate_waitlist(p_resource_id UUID)
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, pg_temp
+SET search_path = pg_catalog, extensions, pg_temp
 AS $$
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtext('waitlist:' || p_resource_id::text));
@@ -155,7 +157,8 @@ GRANT EXECUTE ON FUNCTION public.recalculate_waitlist(UUID) TO service_role;
 
 -- ------------------------------------------------------------------------------
 -- 5. RPC 1: request_booking
--- Atomic qualification, membership, usage limits (including overdue), and insertion.
+-- Exclusive client reservation creation endpoint.
+-- Atomic qualification, membership, availability, and usage limits (including overdue).
 -- Requester identity is strictly derived from auth.uid().
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.request_booking(
@@ -167,7 +170,7 @@ CREATE OR REPLACE FUNCTION public.request_booking(
 RETURNS public.bookings
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, extensions, public, pg_temp
+SET search_path = pg_catalog, extensions, pg_temp
 AS $$
 DECLARE
     v_requester_id UUID;
@@ -178,7 +181,7 @@ DECLARE
     v_new_booking public.bookings%ROWTYPE;
     v_clean_purpose TEXT;
 BEGIN
-    -- 1. Identify requester from authenticated session
+    -- 1. Identify requester strictly from authenticated JWT session
     v_requester_id := auth.uid();
     IF v_requester_id IS NULL THEN
         RAISE EXCEPTION 'Unauthorized: Authentication required to submit booking requests'
@@ -206,7 +209,7 @@ BEGIN
     -- Prevents parallel requests from bypassing usage_limit_per_user
     PERFORM pg_advisory_xact_lock(hashtext(v_requester_id::text || ':' || p_resource_id::text));
 
-    -- 4. Fetch resource details
+    -- 4. Fetch resource details & verify operational availability
     SELECT * INTO v_resource
     FROM public.resources
     WHERE id = p_resource_id;
@@ -243,15 +246,13 @@ BEGIN
 
     -- 6. Enforce resource training requirements
     IF v_resource.training_required IS TRUE THEN
-        -- If prerequisite eligibility requirements are specified in text, ensure user has recorded compliance
         IF v_resource.eligibility_requirements IS NOT NULL AND length(v_resource.eligibility_requirements) > 0 THEN
-            -- In ResourceLoop MVP, verified institutional membership is verified above;
-            -- additional certifications are audited under applicant profile
+            -- ResourceLoop MVP verifies verified institutional status; prerequisites logged with request
             NULL;
         END IF;
     END IF;
 
-    -- 7. Enforce usage_limit_per_user (count active pending, approved, checked_in, AND overdue bookings)
+    -- 7. Enforce usage_limit_per_user (including active pending, approved, checked_in, AND overdue bookings)
     SELECT COUNT(*) INTO v_active_bookings_count
     FROM public.bookings
     WHERE requester_id = v_requester_id
@@ -284,7 +285,7 @@ BEGIN
     )
     RETURNING * INTO v_new_booking;
 
-    -- 9. Explicit structured audit log entry
+    -- 9. Explicit structured audit log entry matching public.audit_logs schema
     INSERT INTO public.audit_logs (actor_id, action, entity_type, entity_id, details)
     VALUES (
         v_requester_id,
@@ -309,26 +310,33 @@ GRANT EXECUTE ON FUNCTION public.request_booking(UUID, TIMESTAMPTZ, TIMESTAMPTZ,
 
 -- ------------------------------------------------------------------------------
 -- 6. RPC 2: approve_booking
--- Approves a booking. Enforces shared resource custody lock and scheduled overlap exclusion.
+-- Approves a booking.
+-- Shared resource lock is acquired FIRST before inspecting custody state.
+-- Precise Overdue Custody Rule:
+-- 1. If resource has an unreturned 'overdue' booking, no new booking starting within
+--    24 hours of now() can be approved until the overdue asset is returned and inspected.
+-- 2. If resource has an active 'checked_in' booking, no booking starting before the
+--    scheduled session end can be approved.
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.approve_booking(p_booking_id UUID)
 RETURNS public.bookings
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, extensions, public, pg_temp
+SET search_path = pg_catalog, extensions, pg_temp
 AS $$
 DECLARE
     v_caller_id UUID;
     v_booking public.bookings%ROWTYPE;
     v_resource public.resources%ROWTYPE;
-    v_active_custody_count INTEGER;
+    v_overdue_conflict_count INTEGER;
+    v_checked_in_conflict_count INTEGER;
 BEGIN
     v_caller_id := auth.uid();
     IF v_caller_id IS NULL THEN
         RAISE EXCEPTION 'Unauthorized: Authentication required' USING ERRCODE = '42501';
     END IF;
 
-    -- 1. Lock booking row for update
+    -- 1. Fetch booking row
     SELECT * INTO v_booking
     FROM public.bookings
     WHERE id = p_booking_id
@@ -353,24 +361,38 @@ BEGIN
         USING ERRCODE = '42501';
     END IF;
 
-    -- 3. SHARED RESOURCE-LEVEL TRANSACTION LOCK:
-    -- Serializes custody evaluation between approve_booking() and verify_check_in()
+    -- 3. CRITICAL: SHARED RESOURCE-LEVEL TRANSACTION LOCK ACQUIRED FIRST
+    -- Guarantees custody evaluations across approve_booking() and verify_check_in() are strictly serialized
     PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_booking.resource_id::text));
 
-    -- 4. ACTIVE CUSTODY PROTECTION:
-    -- Check for any other checked_in or overdue booking on this resource before approving
-    -- an immediate or conflicting session
-    IF v_booking.start_time <= (now() + interval '2 hours') THEN
-        SELECT COUNT(*) INTO v_active_custody_count
+    -- 4. PRECISE ACTIVE CUSTODY EVALUATION (RECHECKED UNDER LOCK):
+    -- Rule A: If the resource currently has any unreturned booking in 'overdue' status,
+    -- approvals are blocked for any candidate booking starting within 24 hours of now().
+    IF v_booking.start_time <= (now() + interval '24 hours') THEN
+        SELECT COUNT(*) INTO v_overdue_conflict_count
         FROM public.bookings
         WHERE resource_id = v_booking.resource_id
           AND id <> v_booking.id
-          AND status IN ('checked_in', 'overdue');
+          AND status = 'overdue';
 
-        IF v_active_custody_count > 0 THEN
-            RAISE EXCEPTION 'Active custody conflict: Equipment is currently in active possession or overdue. It must be returned and inspected before new sessions can be approved.'
+        IF v_overdue_conflict_count > 0 THEN
+            RAISE EXCEPTION 'Active custody conflict: Equipment is currently OVERDUE and unreturned. Approvals for sessions starting within 24 hours are blocked until the asset is returned and inspected.'
             USING ERRCODE = 'P0001';
         END IF;
+    END IF;
+
+    -- Rule B: If the resource currently has an active 'checked_in' session,
+    -- candidate booking cannot start before the active session scheduled end_time.
+    SELECT COUNT(*) INTO v_checked_in_conflict_count
+    FROM public.bookings
+    WHERE resource_id = v_booking.resource_id
+      AND id <> v_booking.id
+      AND status = 'checked_in'
+      AND v_booking.start_time < end_time;
+
+    IF v_checked_in_conflict_count > 0 THEN
+        RAISE EXCEPTION 'Active custody conflict: Equipment is currently checked in. Candidate booking start_time conflicts with ongoing session.'
+        USING ERRCODE = 'P0001';
     END IF;
 
     -- 5. SCHEDULED OVERLAP EXCLUSION & TRANSITION
@@ -392,7 +414,7 @@ BEGIN
     -- 6. Recalculate waitlist if booking was promoted from waitlist
     PERFORM public.recalculate_waitlist(v_booking.resource_id);
 
-    -- 7. Explicit structured audit log entry
+    -- 7. Explicit structured audit log entry matching public.audit_logs schema
     INSERT INTO public.audit_logs (actor_id, action, entity_type, entity_id, details)
     VALUES (
         v_caller_id,
@@ -426,7 +448,7 @@ CREATE OR REPLACE FUNCTION public.reject_booking(
 RETURNS public.bookings
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, extensions, public, pg_temp
+SET search_path = pg_catalog, extensions, pg_temp
 AS $$
 DECLARE
     v_caller_id UUID;
@@ -513,7 +535,7 @@ CREATE OR REPLACE FUNCTION public.waitlist_booking(p_booking_id UUID)
 RETURNS public.bookings
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, extensions, public, pg_temp
+SET search_path = pg_catalog, extensions, pg_temp
 AS $$
 DECLARE
     v_caller_id UUID;
@@ -597,7 +619,7 @@ CREATE OR REPLACE FUNCTION public.cancel_booking(p_booking_id UUID)
 RETURNS public.bookings
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, extensions, public, pg_temp
+SET search_path = pg_catalog, extensions, pg_temp
 AS $$
 DECLARE
     v_caller_id UUID;
@@ -671,8 +693,8 @@ GRANT EXECUTE ON FUNCTION public.cancel_booking(UUID) TO authenticated, service_
 
 -- ------------------------------------------------------------------------------
 -- 10. RPC 6: generate_booking_pass
+-- STRICT FRONTEND CONTRACT: generate_booking_pass(p_booking_id, p_token_type)
 -- STRICT AUTHORIZATION: ONLY the booking requester (seeker) can obtain the raw token!
--- Resource owners/custodians are verifiers, not presenters.
 -- Stored ONLY as SHA-256 hash. Returns raw token string ONCE to the seeker.
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.generate_booking_pass(
@@ -682,12 +704,11 @@ CREATE OR REPLACE FUNCTION public.generate_booking_pass(
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, extensions, public, pg_temp
+SET search_path = pg_catalog, extensions, pg_temp
 AS $$
 DECLARE
     v_caller_id UUID;
     v_booking public.bookings%ROWTYPE;
-    v_resource public.resources%ROWTYPE;
     v_raw_token TEXT;
     v_token_hash TEXT;
     v_expires_at TIMESTAMPTZ;
@@ -786,7 +807,8 @@ GRANT EXECUTE ON FUNCTION public.generate_booking_pass(UUID, TEXT) TO authentica
 -- ------------------------------------------------------------------------------
 -- 11. RPC 7: verify_check_in
 -- Physical QR Handshake: Seeker displays token, Authenticated Custodian scans and verifies.
--- Enforces shared resource custody lock to guarantee concurrent check-ins cannot both succeed.
+-- Shared resource custody lock acquired FIRST before checking active custody.
+-- Custody rechecked under lock to guarantee concurrent check-ins cannot both succeed.
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.verify_check_in(
     p_raw_token TEXT,
@@ -797,7 +819,7 @@ CREATE OR REPLACE FUNCTION public.verify_check_in(
 RETURNS public.bookings
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, extensions, public, pg_temp
+SET search_path = pg_catalog, extensions, pg_temp
 AS $$
 DECLARE
     v_caller_id UUID;
@@ -863,12 +885,11 @@ BEGIN
         USING ERRCODE = '42501';
     END IF;
 
-    -- SHARED RESOURCE-LEVEL TRANSACTION LOCK:
-    -- Guarantees concurrent check-in attempts are serialized and cannot both succeed
+    -- CRITICAL STEP 1: ACQUIRE SHARED RESOURCE-LEVEL TRANSACTION LOCK FIRST
     PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_booking.resource_id::text));
 
-    -- CRITICAL ACTIVE CUSTODY PROTECTION:
-    -- Verify no other borrower currently has possession of this equipment (checked_in or overdue)
+    -- CRITICAL STEP 2: RECHECK ACTIVE CUSTODY UNDER LOCK
+    -- Guarantees concurrent check-in attempts are serialized and cannot both succeed
     SELECT COUNT(*) INTO v_active_custody_count
     FROM public.bookings
     WHERE resource_id = v_booking.resource_id
@@ -963,7 +984,7 @@ CREATE OR REPLACE FUNCTION public.verify_check_out(
 RETURNS public.bookings
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, extensions, public, pg_temp
+SET search_path = pg_catalog, extensions, pg_temp
 AS $$
 DECLARE
     v_caller_id UUID;
@@ -1134,7 +1155,7 @@ CREATE OR REPLACE FUNCTION public.mark_overdue_bookings()
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, extensions, public, pg_temp
+SET search_path = pg_catalog, extensions, pg_temp
 AS $$
 DECLARE
     v_updated_count INTEGER := 0;
@@ -1189,91 +1210,27 @@ END;
 $$;
 
 ALTER FUNCTION public.mark_overdue_bookings() OWNER TO postgres;
--- Restricted to service_role (maintenance crons/internal runners only)
 REVOKE ALL ON FUNCTION public.mark_overdue_bookings() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.mark_overdue_bookings() TO service_role;
 
 -- ------------------------------------------------------------------------------
--- 14. PREVENT DIRECT UNAUTHORIZED MUTATIONS (TRIGGER GUARD + RLS)
+-- 14. TABLE PRIVILEGES & RLS POLICIES (RPC-ONLY MUTATION LOCKDOWN)
 -- ------------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.enforce_booking_state_machine_guard()
-RETURNS TRIGGER
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, pg_temp
-AS $$
-BEGIN
-    -- Allow trusted background/maintenance sessions or service_role or admin
-    IF session_user IN ('postgres', 'supabase_admin') OR auth.role() = 'service_role' OR public.is_admin() THEN
-        RETURN NEW;
-    END IF;
+-- REVOKE direct client INSERT, UPDATE, and DELETE privileges on public.bookings.
+-- All mutations must execute through the SECURITY DEFINER RPCs.
+REVOKE INSERT, UPDATE, DELETE ON public.bookings FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.bookings TO authenticated, service_role;
+GRANT INSERT, UPDATE, DELETE ON public.bookings TO service_role;
 
-    -- If INSERT: direct insertion by authenticated users is ONLY allowed in 'pending' status
-    IF TG_OP = 'INSERT' THEN
-        IF NEW.status <> 'pending' THEN
-            RAISE EXCEPTION 'Unauthorized: New bookings must be created in "pending" status. Status "%" cannot be directly set on insert.', NEW.status
-            USING ERRCODE = '42501';
-        END IF;
-        NEW.waitlist_position := NULL;
-        NEW.approved_by := NULL;
-    END IF;
-
-    -- If UPDATE: direct status modification by ordinary users is restricted
-    IF TG_OP = 'UPDATE' THEN
-        IF NEW.status IS DISTINCT FROM OLD.status THEN
-            -- Requesters may only cancel their own pending/waitlisted/approved bookings
-            IF (OLD.requester_id = auth.uid() AND NEW.status = 'cancelled' AND OLD.status IN ('pending', 'waitlisted', 'approved')) THEN
-                RETURN NEW;
-            END IF;
-
-            -- All other status transitions must go through authorized SECURITY DEFINER RPCs
-            RAISE EXCEPTION 'Unauthorized: Direct booking status transition from "%" to "%" is blocked. You must use the authorized RPC state machine endpoints.', OLD.status, NEW.status
-            USING ERRCODE = '42501';
-        END IF;
-
-        -- Prevent ordinary users from altering core schedule once approved
-        IF OLD.status IN ('approved', 'checked_in', 'returned', 'overdue') THEN
-            IF (NEW.start_time IS DISTINCT FROM OLD.start_time OR NEW.end_time IS DISTINCT FROM OLD.end_time OR NEW.resource_id IS DISTINCT FROM OLD.resource_id) THEN
-                RAISE EXCEPTION 'Immutable schedule: Booking schedule cannot be directly modified once confirmed.'
-                USING ERRCODE = '42501';
-            END IF;
-        END IF;
-    END IF;
-
-    RETURN NEW;
-END;
-$$;
-
-ALTER FUNCTION public.enforce_booking_state_machine_guard() OWNER TO postgres;
-
-DROP TRIGGER IF EXISTS trg_booking_state_machine_guard ON public.bookings;
-CREATE TRIGGER trg_booking_state_machine_guard
-    BEFORE INSERT OR UPDATE ON public.bookings
-    FOR EACH ROW EXECUTE FUNCTION public.enforce_booking_state_machine_guard();
-
--- RLS Update Policy
+-- Clean up any obsolete permissive mutation policies on bookings
+DROP POLICY IF EXISTS "bookings_insert_requester" ON public.bookings;
 DROP POLICY IF EXISTS "bookings_update_policy" ON public.bookings;
+DROP POLICY IF EXISTS "bookings_delete_admin" ON public.bookings;
 
-CREATE POLICY "bookings_update_policy"
+-- Only administrators or service_role can perform direct table mutations (e.g. for maintenance)
+CREATE POLICY "bookings_admin_mutation"
     ON public.bookings
-    FOR UPDATE
+    FOR ALL
     TO authenticated
-    USING (
-        public.is_admin()
-        OR requester_id = auth.uid()
-        OR EXISTS (
-            SELECT 1 FROM public.resources r
-            WHERE r.id = bookings.resource_id AND r.owner_id = auth.uid()
-        )
-    )
-    WITH CHECK (
-        public.is_admin()
-        OR (requester_id = auth.uid() AND status = 'cancelled')
-        OR (
-            EXISTS (
-                SELECT 1 FROM public.resources r
-                WHERE r.id = bookings.resource_id AND r.owner_id = auth.uid()
-            )
-            AND status IN ('cancelled', 'rejected')
-        )
-    );
+    USING (public.is_admin())
+    WITH CHECK (public.is_admin());

@@ -242,16 +242,17 @@ Row Level Security is enabled across all 8 tables.
 | `organizations` | Verified or user's org | Admin only | Admin only | Admin only |
 | `profiles` | Own profile, org peers, owners, admins | Own profile / trigger | Own profile (role immutable) | Admin only |
 | `resources` | Active resources (`status <> 'unavailable'`) or owner/admin | Owner/Admin with matching org | Owner or Admin | Owner or Admin |
-| `bookings` | Requester, Resource Owner, or Admin | Requester (`status = 'pending'`) | Requester (cancel only) OR Owner/Admin (transitions) | Admin only |
+| `bookings` | Requester, Resource Owner, or Admin | **RPC ONLY** (`request_booking`) | **RPC ONLY** (Designated state transitions) | Admin only |
 | `booking_access_tokens` | Admin only | System / RPC | Admin only | Admin only |
 | `condition_reports` | Requester, Owner, Admin | Booking participants | **BLOCKED** (Immutable) | Admin only |
 | `incidents` | Reporter, Owner, Admin | Booking participants | Owner or Admin | Admin only |
 | `notifications` | Recipient only (`user_id = auth.uid()`) | System / Authenticated | Recipient only (`is_read`) | Recipient only |
 | `audit_logs` | Admin only | Authenticated / Triggers | **BLOCKED** (Immutable) | **BLOCKED** (Immutable) |
 
-### Privilege Escalation & State Machine Guarding
-1. **User Role Escalation**: Profiles role changes blocked unless caller is `is_admin()`.
-2. **Booking State Machine Guard (`trg_booking_state_machine_guard`)**: A `BEFORE INSERT OR UPDATE` trigger prevents direct manipulation of booking statuses. New bookings must enter in `pending`; transitions must route through authorized `SECURITY DEFINER` RPCs.
+### Privilege Escalation & RPC-Only State Machine Guarding
+1. **Direct Table Privilege Revocation**: Direct `INSERT`, `UPDATE`, and `DELETE` on `public.bookings` are strictly **REVOKED** from `authenticated` and `anon` roles. All booking creation and state transitions must execute through designated `SECURITY DEFINER` RPCs.
+2. **Search Path Hardening**: All RPCs configure `SET search_path = pg_catalog, extensions, pg_temp`, removing `public` from the search path to eliminate object-hijacking vectors. All application objects are explicitly schema-qualified (`public.*`).
+3. **User Role Escalation**: Profile role changes are blocked unless caller is `is_admin()`.
 
 ---
 
