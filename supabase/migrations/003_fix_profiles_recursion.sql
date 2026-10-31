@@ -1,26 +1,28 @@
 -- ==============================================================================
 -- ResourceLoop - Smart Institutional Resource Sharing Network
--- Migration: 003_fix_profiles_recursion.sql (REVISED SECURITY HARDENED)
+-- Migration: 003_fix_profiles_recursion.sql (FINAL PRODUCTION-HARDENED REVISION)
 -- 
--- Fixes:
+-- Fixes & Security Hardening:
 -- 1. Eliminates PostgreSQL 42P17 infinite recursion in profiles_select_policy.
--- 2. Uses session_user (not current_user) in SECURITY DEFINER role guard trigger.
--- 3. Checks trusted Supabase JWT role ('service_role') explicitly, no blanket auth.uid() IS NULL.
--- 4. Revokes PUBLIC/anon execution on internal security functions.
--- 5. Tightens profiles_select_policy to prevent blanket exposure of owner/admin profiles.
--- 6. Enforces search_path = public, pg_temp on all SECURITY DEFINER functions.
+-- 2. Sets secure search_path = pg_catalog, pg_temp on all SECURITY DEFINER functions.
+-- 3. Schema-qualifies every application object reference (public.*, auth.*).
+-- 4. Explicitly assigns function ownership to postgres via ALTER FUNCTION ... OWNER TO.
+-- 5. Uses session_user to preserve trusted SQL Editor (postgres/supabase_admin) role management.
+-- 6. Verifies trusted Supabase JWT claim ('service_role') without blanket auth.uid() IS NULL.
+-- 7. Revokes default PUBLIC and anon execution grants on internal helper functions.
+-- 8. Restricts profiles_select_policy to prevent blanket leakage of owner/admin profiles.
 -- ==============================================================================
 
 -- ------------------------------------------------------------------------------
--- 1. SECURITY DEFINER HELPER FUNCTIONS (Safe RLS bypass with strict search_path)
+-- 1. SECURITY DEFINER HELPER FUNCTIONS (Strict search_path & Explicit Ownership)
 -- ------------------------------------------------------------------------------
 
 -- Retrieve the authenticated caller's role directly from public.profiles
 CREATE OR REPLACE FUNCTION public.get_current_user_role()
-RETURNS TEXT
+RETURNS text
 LANGUAGE sql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = pg_catalog, pg_temp
 STABLE
 AS $$
     SELECT COALESCE(
@@ -29,23 +31,27 @@ AS $$
     );
 $$;
 
--- Maintain backward compatibility for any existing calls to get_user_role()
+ALTER FUNCTION public.get_current_user_role() OWNER TO postgres;
+
+-- Maintain backward compatibility for existing calls to get_user_role()
 CREATE OR REPLACE FUNCTION public.get_user_role()
-RETURNS TEXT
+RETURNS text
 LANGUAGE sql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = pg_catalog, pg_temp
 STABLE
 AS $$
     SELECT public.get_current_user_role();
 $$;
 
+ALTER FUNCTION public.get_user_role() OWNER TO postgres;
+
 -- Check if current authenticated user has administrative privileges
 CREATE OR REPLACE FUNCTION public.is_admin()
-RETURNS BOOLEAN
+RETURNS boolean
 LANGUAGE sql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = pg_catalog, pg_temp
 STABLE
 AS $$
     SELECT COALESCE(
@@ -54,12 +60,14 @@ AS $$
     );
 $$;
 
+ALTER FUNCTION public.is_admin() OWNER TO postgres;
+
 -- Check if current authenticated user is an owner or admin
 CREATE OR REPLACE FUNCTION public.is_owner_or_admin()
-RETURNS BOOLEAN
+RETURNS boolean
 LANGUAGE sql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = pg_catalog, pg_temp
 STABLE
 AS $$
     SELECT COALESCE(
@@ -68,17 +76,20 @@ AS $$
     );
 $$;
 
+ALTER FUNCTION public.is_owner_or_admin() OWNER TO postgres;
+
 -- Retrieve the authenticated caller's affiliated organization ID directly
--- Returns NULL if user has no affiliation or is unauthenticated
 CREATE OR REPLACE FUNCTION public.get_current_user_org_id()
-RETURNS UUID
+RETURNS uuid
 LANGUAGE sql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = pg_catalog, pg_temp
 STABLE
 AS $$
     SELECT organization_id FROM public.profiles WHERE id = auth.uid();
 $$;
+
+ALTER FUNCTION public.get_current_user_org_id() OWNER TO postgres;
 
 -- ------------------------------------------------------------------------------
 -- 2. LEAST-PRIVILEGE FUNCTION EXECUTE GRANTS
@@ -161,20 +172,14 @@ CREATE POLICY "resource_images_owner_upload"
 -- 6. SECURITY-HARDENED ROLE PROTECTION TRIGGER FUNCTION
 -- ------------------------------------------------------------------------------
 
--- In SECURITY DEFINER functions, current_user evaluates to the function owner (postgres),
--- which would dangerously bypass trigger checks for all callers.
--- We fix this by:
--- 1. Using session_user to identify trusted direct SQL Editor / psql connections.
--- 2. Checking the trusted Supabase JWT claim ('service_role') for automated backend workers.
--- 3. Requiring public.is_admin() for all standard authenticated user sessions.
 CREATE OR REPLACE FUNCTION public.prevent_profile_role_escalation()
-RETURNS TRIGGER
+RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
-    v_jwt_role TEXT;
+    v_jwt_role text;
 BEGIN
     -- Only evaluate when role column is being modified
     IF NEW.role IS DISTINCT FROM OLD.role THEN
@@ -211,6 +216,8 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+ALTER FUNCTION public.prevent_profile_role_escalation() OWNER TO postgres;
 
 -- Ensure the trigger is active on public.profiles
 DROP TRIGGER IF EXISTS trg_profiles_role_guard ON public.profiles;
