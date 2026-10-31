@@ -1,0 +1,150 @@
+-- ==============================================================================
+-- ResourceLoop - Migration 004 Read-Only Preflight Validation Script
+-- ==============================================================================
+-- PURPOSE:
+-- Safely audits an existing database environment BEFORE applying Migration 004.
+-- Performs ZERO writes, creates NO objects, and acquires NO locks.
+-- Run in Supabase SQL Editor or via psql prior to executing 004_booking_engine.sql.
+-- ==============================================================================
+
+DO $$
+DECLARE
+    v_overlapping_approved_count INTEGER := 0;
+    v_invalid_booking_status_count INTEGER := 0;
+    v_duplicate_condition_reports INTEGER := 0;
+    v_btree_gist_installed BOOLEAN := false;
+    v_pgcrypto_installed BOOLEAN := false;
+    v_btree_gist_schema TEXT;
+    v_pgcrypto_schema TEXT;
+    v_bookings_rls_enabled BOOLEAN := false;
+    v_incidents_rls_enabled BOOLEAN := false;
+    v_notifications_rls_enabled BOOLEAN := false;
+    v_audit_logs_rls_enabled BOOLEAN := false;
+    v_donation_resources_count INTEGER := 0;
+    v_can_proceed BOOLEAN := true;
+BEGIN
+    RAISE NOTICE '==============================================================';
+    RAISE NOTICE 'RESOURCELOOP MIGRATION 004 — PREFLIGHT COMPATIBILITY AUDIT';
+    RAISE NOTICE '==============================================================';
+
+    -- --------------------------------------------------------------------------
+    -- CHECK 1: Detect Existing Overlapping 'approved' Bookings
+    -- --------------------------------------------------------------------------
+    -- If any exist, ALTER TABLE ... ADD CONSTRAINT exclude_overlapping_approved_bookings will FAIL.
+    SELECT COUNT(*) INTO v_overlapping_approved_count
+    FROM (
+        SELECT b1.id
+        FROM public.bookings b1
+        JOIN public.bookings b2 ON b1.resource_id = b2.resource_id
+                               AND b1.id < b2.id
+                               AND b1.status = 'approved'
+                               AND b2.status = 'approved'
+                               AND tstzrange(b1.start_time, b1.end_time) && tstzrange(b2.start_time, b2.end_time)
+    ) collisions;
+
+    IF v_overlapping_approved_count > 0 THEN
+        v_can_proceed := false;
+        RAISE WARNING '[BLOCKER] Found % pair(s) of overlapping approved bookings in public.bookings.', v_overlapping_approved_count;
+        RAISE WARNING 'Action: Cancel or adjust overlapping approved bookings before adding the exclusion constraint.';
+    ELSE
+        RAISE NOTICE '[OK] Check 1: Zero overlapping approved reservations found. GiST exclusion constraint can safely be added.';
+    END IF;
+
+    -- --------------------------------------------------------------------------
+    -- CHECK 2: Validate Existing Booking Status Strings
+    -- --------------------------------------------------------------------------
+    SELECT COUNT(*) INTO v_invalid_booking_status_count
+    FROM public.bookings
+    WHERE status NOT IN ('pending', 'approved', 'rejected', 'waitlisted', 'checked_in', 'returned', 'overdue', 'cancelled');
+
+    IF v_invalid_booking_status_count > 0 THEN
+        v_can_proceed := false;
+        RAISE WARNING '[BLOCKER] Found % booking row(s) with unrecognized status values.', v_invalid_booking_status_count;
+    ELSE
+        RAISE NOTICE '[OK] Check 2: All existing bookings have valid status strings.';
+    END IF;
+
+    -- --------------------------------------------------------------------------
+    -- CHECK 3: Detect Duplicate Condition Reports per Stage
+    -- --------------------------------------------------------------------------
+    SELECT COUNT(*) INTO v_duplicate_condition_reports
+    FROM (
+        SELECT booking_id, report_type
+        FROM public.condition_reports
+        GROUP BY booking_id, report_type
+        HAVING COUNT(*) > 1
+    ) dupes;
+
+    IF v_duplicate_condition_reports > 0 THEN
+        v_can_proceed := false;
+        RAISE WARNING '[BLOCKER] Found % duplicate (booking_id, report_type) pair(s) in condition_reports.', v_duplicate_condition_reports;
+    ELSE
+        RAISE NOTICE '[OK] Check 3: Unique constraint on (booking_id, report_type) is safe to apply.';
+    END IF;
+
+    -- --------------------------------------------------------------------------
+    -- CHECK 4: Verify Installed Extensions & Schemas
+    -- --------------------------------------------------------------------------
+    SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'btree_gist'),
+           (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'btree_gist')
+    INTO v_btree_gist_installed, v_btree_gist_schema;
+
+    SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto'),
+           (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pgcrypto')
+    INTO v_pgcrypto_installed, v_pgcrypto_schema;
+
+    IF NOT v_btree_gist_installed THEN
+        v_can_proceed := false;
+        RAISE WARNING '[BLOCKER] Extension btree_gist is not installed.';
+        RAISE WARNING 'Action: Run CREATE EXTENSION btree_gist WITH SCHEMA extensions;';
+    ELSIF v_btree_gist_schema <> 'extensions' THEN
+        v_can_proceed := false;
+        RAISE WARNING '[BLOCKER] Extension btree_gist is installed in schema "%", but Migration 004 requires schema "extensions".', v_btree_gist_schema;
+        RAISE WARNING 'Action: Run ALTER EXTENSION btree_gist SET SCHEMA extensions; as superuser/postgres.';
+    ELSE
+        RAISE NOTICE '[OK] Check 4a: Extension btree_gist is installed in schema "extensions".';
+    END IF;
+
+    IF NOT v_pgcrypto_installed THEN
+        v_can_proceed := false;
+        RAISE WARNING '[BLOCKER] Extension pgcrypto is not installed.';
+        RAISE WARNING 'Action: Run CREATE EXTENSION pgcrypto WITH SCHEMA extensions;';
+    ELSIF v_pgcrypto_schema <> 'extensions' THEN
+        v_can_proceed := false;
+        RAISE WARNING '[BLOCKER] Extension pgcrypto is installed in schema "%", but Migration 004 requires schema "extensions".', v_pgcrypto_schema;
+        RAISE WARNING 'Action: Run ALTER EXTENSION pgcrypto SET SCHEMA extensions; as superuser/postgres.';
+    ELSE
+        RAISE NOTICE '[OK] Check 4b: Extension pgcrypto is installed in schema "extensions".';
+    END IF;
+
+    -- --------------------------------------------------------------------------
+    -- CHECK 5: Verify Row Level Security Activation
+    -- --------------------------------------------------------------------------
+    SELECT relrowsecurity INTO v_bookings_rls_enabled FROM pg_class WHERE oid = 'public.bookings'::regclass;
+    SELECT relrowsecurity INTO v_incidents_rls_enabled FROM pg_class WHERE oid = 'public.incidents'::regclass;
+    SELECT relrowsecurity INTO v_notifications_rls_enabled FROM pg_class WHERE oid = 'public.notifications'::regclass;
+    SELECT relrowsecurity INTO v_audit_logs_rls_enabled FROM pg_class WHERE oid = 'public.audit_logs'::regclass;
+
+    RAISE NOTICE '[INFO] RLS status: bookings=%, incidents=%, notifications=%, audit_logs=%',
+        v_bookings_rls_enabled, v_incidents_rls_enabled, v_notifications_rls_enabled, v_audit_logs_rls_enabled;
+
+    -- --------------------------------------------------------------------------
+    -- CHECK 6: Donation Metadata Compatibility (Safe Parsing)
+    -- --------------------------------------------------------------------------
+    SELECT COUNT(*) INTO v_donation_resources_count
+    FROM public.resources
+    WHERE LOWER(TRIM(COALESCE(availability_info->>'is_donation', 'false'))) IN ('true', 't', '1', 'yes');
+
+    RAISE NOTICE '[OK] Check 6: Resource donation metadata compatibility verified. Active donation listings: %', v_donation_resources_count;
+
+    -- --------------------------------------------------------------------------
+    -- PREFLIGHT SUMMARY
+    -- --------------------------------------------------------------------------
+    RAISE NOTICE '--------------------------------------------------------------';
+    IF v_can_proceed THEN
+        RAISE NOTICE '>>> PREFLIGHT AUDIT PASSED: Database is 100%% ready for Migration 004.';
+    ELSE
+        RAISE WARNING '>>> PREFLIGHT AUDIT FAILED: Address the blockers above before running Migration 004.';
+    END IF;
+    RAISE NOTICE '==============================================================';
+END $$;
