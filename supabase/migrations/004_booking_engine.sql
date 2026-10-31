@@ -78,7 +78,7 @@ END $$;
 
 -- Verify required extensions resolve under the 'extensions' schema.
 -- Prevents Migration 004 from proceeding into a broken state if pgcrypto or btree_gist
--- remains in 'public' and cannot be accessed under the hardened SECURITY DEFINER search path.
+-- is missing or remains outside the 'extensions' schema.
 DO $$
 DECLARE
     v_pgcrypto_schema TEXT;
@@ -92,12 +92,20 @@ BEGIN
     FROM pg_extension e JOIN pg_namespace n ON e.extnamespace = n.oid
     WHERE e.extname = 'btree_gist';
 
-    IF v_pgcrypto_schema IS NOT NULL AND v_pgcrypto_schema <> 'extensions' THEN
+    -- 1. Check pgcrypto presence and schema
+    IF v_pgcrypto_schema IS NULL THEN
+        RAISE EXCEPTION 'CRITICAL EXTENSION MISSING: Extension "pgcrypto" is not installed. Migration 004 requires pgcrypto under schema "extensions". Please execute "CREATE EXTENSION pgcrypto WITH SCHEMA extensions;" before applying Migration 004.'
+        USING ERRCODE = '0A000';
+    ELSIF v_pgcrypto_schema <> 'extensions' THEN
         RAISE EXCEPTION 'CRITICAL EXTENSION SCHEMA MISMATCH: Extension pgcrypto is installed in schema "%", but Migration 004 requires schema "extensions". Please execute "ALTER EXTENSION pgcrypto SET SCHEMA extensions;" before applying Migration 004.', v_pgcrypto_schema
         USING ERRCODE = '0A000';
     END IF;
 
-    IF v_btree_gist_schema IS NOT NULL AND v_btree_gist_schema <> 'extensions' THEN
+    -- 2. Check btree_gist presence and schema
+    IF v_btree_gist_schema IS NULL THEN
+        RAISE EXCEPTION 'CRITICAL EXTENSION MISSING: Extension "btree_gist" is not installed. Migration 004 requires btree_gist under schema "extensions". Please execute "CREATE EXTENSION btree_gist WITH SCHEMA extensions;" before applying Migration 004.'
+        USING ERRCODE = '0A000';
+    ELSIF v_btree_gist_schema <> 'extensions' THEN
         RAISE EXCEPTION 'CRITICAL EXTENSION SCHEMA MISMATCH: Extension btree_gist is installed in schema "%", but Migration 004 requires schema "extensions". Please execute "ALTER EXTENSION btree_gist SET SCHEMA extensions;" before applying Migration 004.', v_btree_gist_schema
         USING ERRCODE = '0A000';
     END IF;
