@@ -252,6 +252,11 @@ $$ LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = public;
 CREATE OR REPLACE FUNCTION public.prevent_profile_role_escalation()
 RETURNS TRIGGER AS $$
 BEGIN
+    -- Allow direct database migrations, superusers, and service_role executions
+    IF current_user IN ('postgres', 'service_role', 'supabase_admin') OR auth.uid() IS NULL THEN
+        RETURN NEW;
+    END IF;
+
     IF NEW.role IS DISTINCT FROM OLD.role THEN
         IF NOT public.is_admin() THEN
             RAISE EXCEPTION 'Unauthorized: Only platform administrators can change user roles.';
