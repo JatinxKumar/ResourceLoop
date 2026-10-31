@@ -90,12 +90,12 @@ export const LandingPage: React.FC = () => {
                 <div className="flex items-center justify-between pb-4 border-b border-slate-100">
                   <div>
                     <span className="text-xs uppercase font-bold text-slate-400 tracking-wider">
-                      Network Live Telemetry
+                      Prototype Analytics
                     </span>
-                    <h3 className="text-lg font-bold text-navy-950 mt-0.5">Campus Resource Efficiency</h3>
+                    <h3 className="text-lg font-bold text-navy-950 mt-0.5">Projected Campus Efficiency</h3>
                   </div>
-                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                    Active
+                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200">
+                    Model Projection
                   </span>
                 </div>
 

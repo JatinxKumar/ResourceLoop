@@ -122,6 +122,9 @@ export const LoginPage: React.FC = () => {
               Admin (Thorne)
             </button>
           </div>
+          <p className="text-[10px] text-slate-400 leading-tight">
+            Note: Test credentials require executing <code>seed.sql</code> in your Supabase project. Real authentication will be checked against your instance.
+          </p>
         </div>
 
         {/* Real Login Form */}

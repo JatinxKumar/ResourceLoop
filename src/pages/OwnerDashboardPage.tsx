@@ -143,10 +143,10 @@ export const OwnerDashboardPage: React.FC = () => {
     const file = e.target.files?.[0]
     if (!file) return
 
-    // Enforce allowed image MIME types matching backend ALLOWED_IMAGE_TYPES
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/svg+xml']
+    // Enforce allowed image MIME types matching backend ALLOWED_IMAGE_TYPES (strictly JPEG, PNG, WebP)
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp']
     if (!allowedTypes.includes(file.type)) {
-      setFormError('Invalid file format. Please upload JPEG, PNG, or WebP.')
+      setFormError('Invalid file format. Please upload a JPEG, PNG, or WebP image.')
       return
     }
 
@@ -584,12 +584,12 @@ export const OwnerDashboardPage: React.FC = () => {
                   <div className="flex-1 space-y-1">
                     <input
                       type="file"
-                      accept="image/jpeg,image/png,image/webp,image/gif"
+                      accept="image/jpeg,image/png,image/webp"
                       onChange={handleFileChange}
                       className="block w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-navy-900 file:text-white hover:file:bg-navy-800 cursor-pointer"
                     />
                     <p className="text-[10px] text-slate-400">
-                      JPEG, PNG, WebP or GIF up to 5MB. Verified by backend service layer.
+                      JPEG, PNG, or WebP up to 5MB. Verified by backend service layer.
                     </p>
                   </div>
                 </div>
