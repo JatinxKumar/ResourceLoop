@@ -288,7 +288,8 @@ Direct table mutations on `public.bookings` (`INSERT`, `UPDATE`, `DELETE`) are s
 | **`generate_booking_pass`** | `p_booking_id UUID`<br>`p_token_type TEXT` | `JSONB` | `authenticated, service_role`<br>**STRICT**: Caller must be booking requester (`auth.uid() = requester_id`) or admin. |
 | **`verify_check_in`** | `p_raw_token TEXT`<br>`p_condition_status TEXT`<br>`p_condition_notes TEXT DEFAULT NULL`<br>`p_image_url TEXT DEFAULT NULL` | `public.bookings` (ROW) | `authenticated, service_role`<br>Caller must be resource custodian/owner or platform administrator. |
 | **`verify_check_out`**| `p_raw_token TEXT`<br>`p_condition_status TEXT`<br>`p_condition_notes TEXT DEFAULT NULL`<br>`p_image_url TEXT DEFAULT NULL` | `public.bookings` (ROW) | `authenticated, service_role`<br>Caller must be resource custodian/owner or platform administrator. |
-| **`mark_overdue_bookings`** | *none* | `INTEGER` | **`service_role` ONLY**<br>`REVOKE ALL FROM PUBLIC, anon, authenticated`. Internal maintenance endpoint. |
+| **`accept_donation`** | `p_booking_id UUID` | `public.bookings` (ROW) | `authenticated, service_role`<br>Caller must be resource owner or platform administrator (`is_admin()`). Atomically approves booking, retires asset, updates waitlist, logs audit, notifies recipient. |
+| **`mark_overdue_bookings`** | *none* | `INTEGER` | `authenticated, service_role`<br>Restricted to `service_role` (background scheduler/cron) or platform administrator (`is_admin()`). Acquires custody lock per asset. |
 | **`recalculate_waitlist`** | `p_resource_id UUID` | `void` | **`service_role` ONLY**<br>`REVOKE ALL FROM PUBLIC, anon, authenticated`. Internal queue engine helper. |
 
 ---

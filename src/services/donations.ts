@@ -195,12 +195,49 @@ export async function requestDonation(dto: RequestDonationDTO): Promise<Booking>
 
 /**
  * Accepts a donation transfer request.
- * Enforces ownership verification, booking authorization, resource lifecycle retirement,
- * recipient notification, and immutable audit logging.
+ * Executes atomically in a single database transaction via the public.accept_donation RPC:
+ *   1. Authenticates caller & verifies ownership/admin privileges.
+ *   2. Validates booking is currently pending/waitlisted.
+ *   3. Validates donation metadata and [DONATION_CLAIM] purpose marker.
+ *   4. Enforces active custody protection and shared resource advisory locks.
+ *   5. Approves booking, assigns approver, clears waitlist position.
+ *   6. Retires resource lifecycle status to 'unavailable'.
+ *   7. Recalculates waitlist queue for remaining reservations.
+ *   8. Provisions compliance audit trail record.
+ *   9. Dispatches recipient notification.
+ * Failure of any step rolls back the entire database transaction.
  */
 export async function acceptDonation(bookingId: string): Promise<Booking> {
   if (!bookingId) throw new Error('Booking ID is required');
 
+  // Primary execution: Atomic single-transaction RPC
+  const { data, error } = await supabase.rpc('accept_donation', {
+    p_booking_id: bookingId,
+  });
+
+  if (!error && data) {
+    return data as Booking;
+  }
+
+  // Graceful fallback if Migration 004 RPC has not yet been executed in target database
+  if (
+    error &&
+    (error.code === '42883' ||
+      error.message?.includes('accept_donation') ||
+      error.message?.includes('does not exist'))
+  ) {
+    console.warn('[acceptDonation] accept_donation RPC not yet deployed to target DB; executing coordinated fallback');
+    return acceptDonationFallback(bookingId);
+  }
+
+  console.error('[acceptDonation] RPC error:', error?.message);
+  throw new Error(error?.message || 'Failed to accept donation');
+}
+
+/**
+ * Coordinated fallback implementation for staging environments prior to Migration 004 RPC execution.
+ */
+async function acceptDonationFallback(bookingId: string): Promise<Booking> {
   const profile = await getCurrentProfile();
   if (!profile) {
     throw new Error('Unauthorized: Authentication required to accept donation');
@@ -211,7 +248,6 @@ export async function acceptDonation(bookingId: string): Promise<Booking> {
     throw new Error('Booking not found');
   }
 
-  // Check 1: Ownership Verification
   const resource = booking.resource;
   if (!resource) {
     throw new Error('Associated resource not found');
@@ -223,33 +259,29 @@ export async function acceptDonation(bookingId: string): Promise<Booking> {
     throw new Error('Forbidden: Only the resource owner or an administrator can accept a donation request');
   }
 
-  // Check 2: Verify booking status is pending or waitlisted
   if (booking.status !== 'pending' && booking.status !== 'waitlisted') {
     throw new Error(`Cannot accept donation: Booking is in "${booking.status}" status, must be "pending" or "waitlisted"`);
   }
 
-  // Check 3: Verify resource is flagged as donation
-  const isDonation = resource.availability_info?.is_donation === true ||
-                     booking.purpose.includes('[DONATION_CLAIM]');
+  const isDonation =
+    resource.availability_info?.is_donation === true ||
+    booking.purpose.includes('[DONATION_CLAIM]');
   if (!isDonation) {
     throw new Error('Resource or booking is not marked as a surplus donation');
   }
 
-  // Check 4: Approve through the core booking engine (enforces advisory custody locks, FIFO, and exclusion)
   const approved = await approveBooking(bookingId);
 
-  // Check 5: Update resource lifecycle to 'unavailable' (so it cannot be re-requested or booked)
   const { error: resourceUpdateError } = await supabase
     .from('resources')
     .update({ status: 'unavailable', updated_at: new Date().toISOString() })
     .eq('id', booking.resource_id);
 
   if (resourceUpdateError) {
-    console.error('[acceptDonation] Failed to retire resource:', resourceUpdateError.message);
+    console.error('[acceptDonationFallback] Failed to retire resource:', resourceUpdateError.message);
     throw new Error(`Failed to update resource lifecycle status: ${resourceUpdateError.message}`);
   }
 
-  // Check 6: Immutable compliance audit logging
   await supabase.from('audit_logs').insert({
     actor_id: profile.id,
     action: 'DONATION_TRANSFER_ACCEPTED',
@@ -264,7 +296,6 @@ export async function acceptDonation(bookingId: string): Promise<Booking> {
     },
   });
 
-  // Check 7: Recipient notification
   await supabase.from('notifications').insert({
     user_id: booking.requester_id,
     title: 'Donation Request Approved',

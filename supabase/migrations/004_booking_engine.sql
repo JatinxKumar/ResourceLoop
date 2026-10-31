@@ -1330,6 +1330,12 @@ DECLARE
     v_resource RECORD;
     v_record RECORD;
 BEGIN
+    -- Permit service_role (auth.uid() IS NULL) or authenticated platform administrators
+    IF auth.uid() IS NOT NULL AND NOT public.is_admin() THEN
+        RAISE EXCEPTION 'Unauthorized: Only service_role or platform administrators can trigger overdue sweeps'
+        USING ERRCODE = '42501';
+    END IF;
+
     -- Iterate across distinct resources with overdue bookings in deterministic order
     FOR v_resource IN
         SELECT DISTINCT resource_id
@@ -1396,11 +1402,158 @@ END;
 $$;
 
 ALTER FUNCTION public.mark_overdue_bookings() OWNER TO postgres;
-REVOKE ALL ON FUNCTION public.mark_overdue_bookings() FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.mark_overdue_bookings() TO service_role;
+REVOKE ALL ON FUNCTION public.mark_overdue_bookings() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.mark_overdue_bookings() TO authenticated, service_role;
 
 -- ------------------------------------------------------------------------------
--- 14. TABLE PRIVILEGES & RLS POLICIES (RPC-ONLY MUTATION LOCKDOWN)
+-- 14. RPC 10: accept_donation
+-- Atomically approves a donation booking and retires the surplus asset.
+-- Guarantees single-transaction atomicity across:
+--   1. Caller authentication & ownership/admin authorization
+--   2. Booking status validation (must be 'pending' or 'waitlisted')
+--   3. Donation metadata validation (is_donation flag or [DONATION_CLAIM] marker)
+--   4. Active custody protection (no unreturned session on resource)
+--   5. Booking approval (assigns approver, clears waitlist position)
+--   6. Resource retirement (status = 'unavailable')
+--   7. Waitlist recalculation for remaining requests
+--   8. Recipient notification creation
+--   9. Compliance audit log recording
+-- Failure of any step automatically rolls back the entire transaction.
+-- ------------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.accept_donation(
+    p_booking_id UUID
+)
+RETURNS public.bookings
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, extensions, pg_temp
+AS $$
+DECLARE
+    v_caller_id UUID;
+    v_booking public.bookings%ROWTYPE;
+    v_resource public.resources%ROWTYPE;
+BEGIN
+    v_caller_id := auth.uid();
+    IF v_caller_id IS NULL THEN
+        RAISE EXCEPTION 'Unauthorized: Authentication required' USING ERRCODE = '42501';
+    END IF;
+
+    -- Lookup booking
+    SELECT * INTO v_booking
+    FROM public.bookings
+    WHERE id = p_booking_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Booking not found: %', p_booking_id USING ERRCODE = 'P0002';
+    END IF;
+
+    -- Lookup resource
+    SELECT * INTO v_resource
+    FROM public.resources
+    WHERE id = v_booking.resource_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Resource not found: %', v_booking.resource_id USING ERRCODE = 'P0002';
+    END IF;
+
+    -- Strict Lock Hierarchy Step 1: Acquire shared resource-custody advisory lock FIRST
+    PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_resource.id::text));
+
+    -- Strict Lock Hierarchy Step 2: Acquire row locks on resource and booking under custody lock
+    SELECT * INTO v_resource
+    FROM public.resources
+    WHERE id = v_resource.id
+    FOR UPDATE;
+
+    SELECT * INTO v_booking
+    FROM public.bookings
+    WHERE id = p_booking_id
+    FOR UPDATE;
+
+    -- Authorization: Caller must be the asset owner or a platform administrator
+    IF NOT (v_resource.owner_id = v_caller_id OR public.is_admin()) THEN
+        RAISE EXCEPTION 'Unauthorized: Only the resource owner or platform administrator can accept a donation transfer'
+        USING ERRCODE = '42501';
+    END IF;
+
+    -- Booking status validation: must be 'pending' or 'waitlisted'
+    IF v_booking.status NOT IN ('pending', 'waitlisted') THEN
+        RAISE EXCEPTION 'State conflict: Booking is in "%" status, but must be "pending" or "waitlisted" to accept donation', v_booking.status
+        USING ERRCODE = 'P0001';
+    END IF;
+
+    -- Donation metadata validation: verify resource is marked for donation or booking has [DONATION_CLAIM] marker
+    IF NOT (
+        COALESCE((v_resource.availability_info->>'is_donation')::boolean, false) IS TRUE
+        OR v_booking.purpose LIKE '[DONATION_CLAIM]%'
+    ) THEN
+        RAISE EXCEPTION 'Validation error: Resource or reservation request is not designated as an institutional surplus donation'
+        USING ERRCODE = 'P0001';
+    END IF;
+
+    -- Active Custody Protection: Ensure equipment is not currently in active borrower possession
+    IF EXISTS (
+        SELECT 1 FROM public.bookings
+        WHERE resource_id = v_booking.resource_id
+          AND id <> v_booking.id
+          AND status IN ('checked_in', 'overdue')
+    ) THEN
+        RAISE EXCEPTION 'Active custody conflict: Equipment is currently in active possession of another borrower. Donation cannot be accepted until return inspection is completed.'
+        USING ERRCODE = 'P0001';
+    END IF;
+
+    -- Step A: Approve booking and clear waitlist position
+    UPDATE public.bookings
+    SET status = 'approved',
+        approved_by = v_caller_id,
+        waitlist_position = NULL,
+        updated_at = now()
+    WHERE id = p_booking_id
+    RETURNING * INTO v_booking;
+
+    -- Step B: Retire resource lifecycle status to 'unavailable' so it cannot be claimed or booked again
+    UPDATE public.resources
+    SET status = 'unavailable',
+        updated_at = now()
+    WHERE id = v_resource.id;
+
+    -- Step C: Recalculate waitlist queue for remaining requests
+    PERFORM public.recalculate_waitlist(v_resource.id);
+
+    -- Step D: Insert compliance audit log
+    INSERT INTO public.audit_logs (actor_id, action, entity_type, entity_id, details)
+    VALUES (
+        v_caller_id,
+        'DONATION_TRANSFER_ACCEPTED',
+        'resource',
+        v_resource.id,
+        jsonb_build_object(
+            'booking_id', p_booking_id,
+            'recipient_id', v_booking.requester_id,
+            'donor_id', v_resource.owner_id,
+            'accepted_at', now()
+        )
+    );
+
+    -- Step E: Insert in-app recipient notification
+    INSERT INTO public.notifications (user_id, title, message, link_url)
+    VALUES (
+        v_booking.requester_id,
+        'Donation Request Approved',
+        'Your donation claim for "' || v_resource.title || '" has been accepted! Please coordinate physical transfer with the donor.',
+        '/seeker/bookings'
+    );
+
+    RETURN v_booking;
+END;
+$$;
+
+ALTER FUNCTION public.accept_donation(UUID) OWNER TO postgres;
+REVOKE ALL ON FUNCTION public.accept_donation(UUID) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.accept_donation(UUID) TO authenticated, service_role;
+
+-- ------------------------------------------------------------------------------
+-- 15. TABLE PRIVILEGES & RLS POLICIES (RPC-ONLY MUTATION LOCKDOWN)
 -- ------------------------------------------------------------------------------
 -- REVOKE direct client INSERT, UPDATE, and DELETE privileges on public.bookings.
 -- All mutations must execute through the SECURITY DEFINER RPCs.
