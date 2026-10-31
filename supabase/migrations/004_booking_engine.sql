@@ -48,14 +48,11 @@ BEGIN
     END IF;
 END $$;
 
--- Scheduled Overlap Prevention:
--- Check existing data before applying constraint to prevent destructive failures.
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint WHERE conname = 'no_overlapping_scheduled_bookings'
     ) THEN
-        -- Verify no existing active bookings overlap before adding constraint
         IF EXISTS (
             SELECT 1 
             FROM public.bookings b1
@@ -77,7 +74,6 @@ BEGIN
     END IF;
 END $$;
 
--- Performance indexes for active custody and status queries
 CREATE INDEX IF NOT EXISTS idx_bookings_resource_custody 
 ON public.bookings(resource_id, status) 
 WHERE status IN ('checked_in', 'overdue');
@@ -108,7 +104,6 @@ WHERE used_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_booking_tokens_booking 
 ON public.booking_access_tokens(booking_id, token_type);
 
--- RLS: Enable and strictly lock down
 ALTER TABLE public.booking_access_tokens ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "tokens_select_participants" ON public.booking_access_tokens;
@@ -126,7 +121,7 @@ REVOKE ALL ON public.booking_access_tokens FROM PUBLIC, anon, authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.booking_access_tokens TO service_role;
 
 -- ------------------------------------------------------------------------------
--- 4. HELPER: Recalculate Waitlist Positions
+-- 4. HELPER: recalculate_waitlist
 -- Restricted to internal execution (service_role / postgres only).
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.recalculate_waitlist(p_resource_id UUID)
@@ -181,14 +176,12 @@ DECLARE
     v_new_booking public.bookings%ROWTYPE;
     v_clean_purpose TEXT;
 BEGIN
-    -- 1. Identify requester strictly from authenticated JWT session
     v_requester_id := auth.uid();
     IF v_requester_id IS NULL THEN
         RAISE EXCEPTION 'Unauthorized: Authentication required to submit booking requests'
         USING ERRCODE = '42501';
     END IF;
 
-    -- 2. Input validation
     v_clean_purpose := trim(COALESCE(p_purpose, ''));
     IF length(v_clean_purpose) < 3 THEN
         RAISE EXCEPTION 'Validation error: Booking purpose must be at least 3 characters long'
@@ -205,11 +198,8 @@ BEGIN
         USING ERRCODE = '22023';
     END IF;
 
-    -- 3. Concurrency serialization per requester and resource
-    -- Prevents parallel requests from bypassing usage_limit_per_user
     PERFORM pg_advisory_xact_lock(hashtext(v_requester_id::text || ':' || p_resource_id::text));
 
-    -- 4. Fetch resource details & verify operational availability
     SELECT * INTO v_resource
     FROM public.resources
     WHERE id = p_resource_id;
@@ -224,7 +214,6 @@ BEGIN
         USING ERRCODE = 'P0001';
     END IF;
 
-    -- 5. Verify requester profile & organization status
     SELECT * INTO v_requester_profile
     FROM public.profiles
     WHERE id = v_requester_id;
@@ -244,15 +233,6 @@ BEGIN
         USING ERRCODE = 'P0001';
     END IF;
 
-    -- 6. Enforce resource training requirements
-    IF v_resource.training_required IS TRUE THEN
-        IF v_resource.eligibility_requirements IS NOT NULL AND length(v_resource.eligibility_requirements) > 0 THEN
-            -- ResourceLoop MVP verifies verified institutional status; prerequisites logged with request
-            NULL;
-        END IF;
-    END IF;
-
-    -- 7. Enforce usage_limit_per_user (including active pending, approved, checked_in, AND overdue bookings)
     SELECT COUNT(*) INTO v_active_bookings_count
     FROM public.bookings
     WHERE requester_id = v_requester_id
@@ -265,7 +245,6 @@ BEGIN
         USING ERRCODE = 'P0001';
     END IF;
 
-    -- 8. Atomic insertion
     INSERT INTO public.bookings (
         resource_id,
         requester_id,
@@ -285,7 +264,6 @@ BEGIN
     )
     RETURNING * INTO v_new_booking;
 
-    -- 9. Explicit structured audit log entry matching public.audit_logs schema
     INSERT INTO public.audit_logs (actor_id, action, entity_type, entity_id, details)
     VALUES (
         v_requester_id,
@@ -336,7 +314,6 @@ BEGIN
         RAISE EXCEPTION 'Unauthorized: Authentication required' USING ERRCODE = '42501';
     END IF;
 
-    -- 1. Fetch booking row
     SELECT * INTO v_booking
     FROM public.bookings
     WHERE id = p_booking_id
@@ -351,7 +328,6 @@ BEGIN
         USING ERRCODE = 'P0001';
     END IF;
 
-    -- 2. Fetch resource & verify authorization
     SELECT * INTO v_resource
     FROM public.resources
     WHERE id = v_booking.resource_id;
@@ -361,13 +337,10 @@ BEGIN
         USING ERRCODE = '42501';
     END IF;
 
-    -- 3. CRITICAL: SHARED RESOURCE-LEVEL TRANSACTION LOCK ACQUIRED FIRST
-    -- Guarantees custody evaluations across approve_booking() and verify_check_in() are strictly serialized
+    -- Lock resource custody first before evaluating checks
     PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_booking.resource_id::text));
 
-    -- 4. PRECISE ACTIVE CUSTODY EVALUATION (RECHECKED UNDER LOCK):
-    -- Rule A: If the resource currently has any unreturned booking in 'overdue' status,
-    -- approvals are blocked for any candidate booking starting within 24 hours of now().
+    -- Precise Overdue Rule: Block if overdue and starting within 24 hours of now
     IF v_booking.start_time <= (now() + interval '24 hours') THEN
         SELECT COUNT(*) INTO v_overdue_conflict_count
         FROM public.bookings
@@ -381,8 +354,7 @@ BEGIN
         END IF;
     END IF;
 
-    -- Rule B: If the resource currently has an active 'checked_in' session,
-    -- candidate booking cannot start before the active session scheduled end_time.
+    -- Block if checked_in and candidate start_time is before ongoing session scheduled end
     SELECT COUNT(*) INTO v_checked_in_conflict_count
     FROM public.bookings
     WHERE resource_id = v_booking.resource_id
@@ -395,7 +367,6 @@ BEGIN
         USING ERRCODE = 'P0001';
     END IF;
 
-    -- 5. SCHEDULED OVERLAP EXCLUSION & TRANSITION
     BEGIN
         UPDATE public.bookings
         SET status = 'approved',
@@ -411,10 +382,8 @@ BEGIN
             USING ERRCODE = '23P01';
     END;
 
-    -- 6. Recalculate waitlist if booking was promoted from waitlist
     PERFORM public.recalculate_waitlist(v_booking.resource_id);
 
-    -- 7. Explicit structured audit log entry matching public.audit_logs schema
     INSERT INTO public.audit_logs (actor_id, action, entity_type, entity_id, details)
     VALUES (
         v_caller_id,
@@ -497,15 +466,12 @@ BEGIN
     WHERE id = p_booking_id
     RETURNING * INTO v_booking;
 
-    -- Invalidate any generated access tokens
     UPDATE public.booking_access_tokens
     SET used_at = now()
     WHERE booking_id = p_booking_id AND used_at IS NULL;
 
-    -- Recalculate remaining waitlist
     PERFORM public.recalculate_waitlist(v_booking.resource_id);
 
-    -- Audit log entry
     INSERT INTO public.audit_logs (actor_id, action, entity_type, entity_id, details)
     VALUES (
         v_caller_id,
@@ -571,10 +537,8 @@ BEGIN
         USING ERRCODE = '42501';
     END IF;
 
-    -- Transactional lock per resource waitlist queue to guarantee strict FIFO serialization
     PERFORM pg_advisory_xact_lock(hashtext('waitlist:' || v_booking.resource_id::text));
 
-    -- Deterministic FIFO queue position per resource and overlapping time window
     SELECT COALESCE(MAX(waitlist_position), 0) + 1
     INTO v_next_pos
     FROM public.bookings
@@ -589,7 +553,6 @@ BEGIN
     WHERE id = p_booking_id
     RETURNING * INTO v_booking;
 
-    -- Audit log entry
     INSERT INTO public.audit_logs (actor_id, action, entity_type, entity_id, details)
     VALUES (
         v_caller_id,
@@ -661,15 +624,12 @@ BEGIN
     WHERE id = p_booking_id
     RETURNING * INTO v_booking;
 
-    -- Invalidate any active access tokens
     UPDATE public.booking_access_tokens
     SET used_at = now()
     WHERE booking_id = p_booking_id AND used_at IS NULL;
 
-    -- Recalculate remaining waitlist
     PERFORM public.recalculate_waitlist(v_booking.resource_id);
 
-    -- Audit log entry
     INSERT INTO public.audit_logs (actor_id, action, entity_type, entity_id, details)
     VALUES (
         v_caller_id,
@@ -731,7 +691,7 @@ BEGIN
         RAISE EXCEPTION 'Booking not found: %', p_booking_id USING ERRCODE = 'P0002';
     END IF;
 
-    -- STRICT AUTHORIZATION: Only the seeker (or admin for support) can generate pass
+    -- STRICT: Only seeker (or admin for support) can generate pass
     IF NOT (v_booking.requester_id = v_caller_id OR public.is_admin()) THEN
         RAISE EXCEPTION 'Unauthorized: Only the booking requester (seeker) can generate access passes'
         USING ERRCODE = '42501';
@@ -753,19 +713,15 @@ BEGIN
         v_expires_at := now() + interval '2 hours';
     END IF;
 
-    -- Invalidate existing unused tokens of the same type
     UPDATE public.booking_access_tokens
     SET used_at = now()
     WHERE booking_id = p_booking_id
       AND token_type = p_token_type
       AND used_at IS NULL;
 
-    -- Generate 256-bit high-entropy random hex token
     v_raw_token := encode(gen_random_bytes(32), 'hex');
-    -- Compute SHA-256 hash using pgcrypto digest
     v_token_hash := encode(digest(v_raw_token, 'sha256'), 'hex');
 
-    -- Store ONLY hash in database
     INSERT INTO public.booking_access_tokens (
         booking_id,
         token_type,
@@ -778,7 +734,6 @@ BEGIN
         v_expires_at
     );
 
-    -- Audit log entry
     INSERT INTO public.audit_logs (actor_id, action, entity_type, entity_id, details)
     VALUES (
         v_caller_id,
@@ -840,10 +795,8 @@ BEGIN
         USING ERRCODE = '22023';
     END IF;
 
-    -- Compute SHA-256 hash of incoming raw token
     v_token_hash := encode(digest(trim(p_raw_token), 'sha256'), 'hex');
 
-    -- Look up token record
     SELECT * INTO v_token_record
     FROM public.booking_access_tokens
     WHERE token_hash = v_token_hash AND token_type = 'check_in'
@@ -864,7 +817,6 @@ BEGIN
         USING ERRCODE = 'P0001';
     END IF;
 
-    -- Resolve booking
     SELECT * INTO v_booking
     FROM public.bookings
     WHERE id = v_token_record.booking_id
@@ -875,7 +827,6 @@ BEGIN
         USING ERRCODE = 'P0001';
     END IF;
 
-    -- Authorization check: Caller must be the asset owner or admin
     SELECT * INTO v_resource
     FROM public.resources
     WHERE id = v_booking.resource_id;
@@ -885,11 +836,10 @@ BEGIN
         USING ERRCODE = '42501';
     END IF;
 
-    -- CRITICAL STEP 1: ACQUIRE SHARED RESOURCE-LEVEL TRANSACTION LOCK FIRST
+    -- Shared resource custody lock acquired first
     PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_booking.resource_id::text));
 
-    -- CRITICAL STEP 2: RECHECK ACTIVE CUSTODY UNDER LOCK
-    -- Guarantees concurrent check-in attempts are serialized and cannot both succeed
+    -- Recheck active custody under lock
     SELECT COUNT(*) INTO v_active_custody_count
     FROM public.bookings
     WHERE resource_id = v_booking.resource_id
@@ -901,7 +851,6 @@ BEGIN
         USING ERRCODE = 'P0001';
     END IF;
 
-    -- Check active timeframe (can check in up to 30 mins before start until end_time)
     IF now() < (v_booking.start_time - interval '30 minutes') THEN
         RAISE EXCEPTION 'Check-in window unopened: Scheduled start is %, check-in opens 30 minutes prior', v_booking.start_time
         USING ERRCODE = 'P0001';
@@ -912,12 +861,10 @@ BEGIN
         USING ERRCODE = 'P0001';
     END IF;
 
-    -- 1. Mark token used
     UPDATE public.booking_access_tokens
     SET used_at = now()
     WHERE id = v_token_record.id;
 
-    -- 2. Atomically create pre-inspection condition report
     INSERT INTO public.condition_reports (
         booking_id,
         submitted_by,
@@ -939,14 +886,12 @@ BEGIN
         notes = EXCLUDED.notes,
         image_url = EXCLUDED.image_url;
 
-    -- 3. Update booking status to checked_in
     UPDATE public.bookings
     SET status = 'checked_in',
         updated_at = now()
     WHERE id = v_booking.id
     RETURNING * INTO v_booking;
 
-    -- 4. Audit log entry
     INSERT INTO public.audit_logs (actor_id, action, entity_type, entity_id, details)
     VALUES (
         v_caller_id,
@@ -1046,15 +991,12 @@ BEGIN
         USING ERRCODE = '42501';
     END IF;
 
-    -- Shared resource lock
     PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_booking.resource_id::text));
 
-    -- 1. Mark token used
     UPDATE public.booking_access_tokens
     SET used_at = now()
     WHERE id = v_token_record.id;
 
-    -- 2. Atomically create post-inspection condition report
     INSERT INTO public.condition_reports (
         booking_id,
         submitted_by,
@@ -1076,7 +1018,6 @@ BEGIN
         notes = EXCLUDED.notes,
         image_url = EXCLUDED.image_url;
 
-    -- 3. Automatic incident escalation for damages or faults (Requires human administrative review)
     IF p_condition_status IN ('damaged', 'faulty') THEN
         INSERT INTO public.incidents (
             booking_id,
@@ -1116,14 +1057,12 @@ BEGIN
         );
     END IF;
 
-    -- 4. Update booking status to returned
     UPDATE public.bookings
     SET status = 'returned',
         updated_at = now()
     WHERE id = v_booking.id
     RETURNING * INTO v_booking;
 
-    -- 5. Audit log entry
     INSERT INTO public.audit_logs (actor_id, action, entity_type, entity_id, details)
     VALUES (
         v_caller_id,
@@ -1222,12 +1161,11 @@ REVOKE INSERT, UPDATE, DELETE ON public.bookings FROM PUBLIC, anon, authenticate
 GRANT SELECT ON public.bookings TO authenticated, service_role;
 GRANT INSERT, UPDATE, DELETE ON public.bookings TO service_role;
 
--- Clean up any obsolete permissive mutation policies on bookings
 DROP POLICY IF EXISTS "bookings_insert_requester" ON public.bookings;
 DROP POLICY IF EXISTS "bookings_update_policy" ON public.bookings;
 DROP POLICY IF EXISTS "bookings_delete_admin" ON public.bookings;
+DROP POLICY IF EXISTS "bookings_admin_mutation" ON public.bookings;
 
--- Only administrators or service_role can perform direct table mutations (e.g. for maintenance)
 CREATE POLICY "bookings_admin_mutation"
     ON public.bookings
     FOR ALL
