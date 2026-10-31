@@ -89,7 +89,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setProfile(null)
       return null
     }
-  }, [user])
+  }, [])
 
   // Initialize auth session on mount
   useEffect(() => {
