@@ -24,7 +24,7 @@ import {
   updateResource,
   deleteResource,
   uploadResourceImage,
-  listOrganizations
+  getOrganizations
 } from '@/hooks/useResources'
 import { fetchOwnerBookings, updateBookingStatus } from '@/hooks/useBookings'
 import { useAuth } from '@/contexts/AuthContext'
@@ -66,15 +66,15 @@ export const OwnerDashboardPage: React.FC = () => {
   const [imagePreview, setImagePreview] = useState<string | null>(null)
   const [uploadingImage, setUploadingImage] = useState(false)
 
-  // Load owner data
+  // Load owner data using backend service functions
   const loadOwnerData = useCallback(async () => {
     if (!user) return
     setLoading(true)
     try {
       const [resList, bksList, orgsList] = await Promise.all([
-        getOwnerResources(user.id),
+        getOwnerResources(),
         fetchOwnerBookings(user.id).catch(() => []),
-        listOrganizations().catch(() => [])
+        getOrganizations().catch(() => [])
       ])
 
       setResources(resList)
@@ -138,16 +138,19 @@ export const OwnerDashboardPage: React.FC = () => {
     setIsModalOpen(true)
   }
 
-  // Handle File Select
+  // Handle File Select with Strict Security Validation
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
 
-    if (!file.type.startsWith('image/')) {
-      setFormError('Only image files (JPEG, PNG, WebP) are accepted.')
+    // Enforce allowed image MIME types matching backend ALLOWED_IMAGE_TYPES
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/svg+xml']
+    if (!allowedTypes.includes(file.type)) {
+      setFormError('Invalid file format. Please upload JPEG, PNG, or WebP.')
       return
     }
 
+    // 5 MB max file size
     if (file.size > 5 * 1024 * 1024) {
       setFormError('Image exceeds the 5MB file size limit.')
       return
@@ -187,7 +190,7 @@ export const OwnerDashboardPage: React.FC = () => {
     try {
       let finalImageUrl = imageUrl
 
-      // If user uploaded a new image, send to Supabase Storage
+      // If user selected an image file, upload through backend uploadResourceImage service
       if (selectedFile) {
         setUploadingImage(true)
         finalImageUrl = await uploadResourceImage(selectedFile, orgToUse)
@@ -201,17 +204,15 @@ export const OwnerDashboardPage: React.FC = () => {
           category,
           resource_type: resourceType,
           location: location.trim(),
-          organization_id: orgToUse,
           status,
           training_required: trainingRequired,
           eligibility_requirements: eligibility.trim() || undefined,
           usage_limit_per_user: Number(usageLimit),
           image_url: finalImageUrl || undefined
         })
-        setFeedbackMessage({ type: 'success', text: `Resource "${title}" updated successfully.` })
+        setFeedbackMessage({ type: 'success', text: `Resource "${title}" updated successfully via service layer.` })
       } else {
         await createResource({
-          owner_id: user.id,
           organization_id: orgToUse,
           title: title.trim(),
           description: description.trim() || undefined,
@@ -272,7 +273,7 @@ export const OwnerDashboardPage: React.FC = () => {
   const pendingBookings = bookings.filter((b) => b.status === 'pending')
 
   if (loading) {
-    return <LoadingSpinner fullPage label="Loading custodian inventory from Supabase..." />
+    return <LoadingSpinner fullPage label="Loading custodian inventory from backend service..." />
   }
 
   return (
@@ -472,7 +473,7 @@ export const OwnerDashboardPage: React.FC = () => {
               {editingResource ? 'Edit Institutional Resource' : 'Catalog New Equipment or Space'}
             </h3>
             <p className="text-xs text-slate-500 mb-5">
-              Enter operational specifications and upload photos to Supabase Storage.
+              Enter operational specifications and upload photos to Supabase Storage via the service layer.
             </p>
 
             {formError && (
@@ -563,10 +564,10 @@ export const OwnerDashboardPage: React.FC = () => {
                 />
               </div>
 
-              {/* Image Upload Form Section (TASK 7) */}
+              {/* Image Upload Form Section */}
               <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
                 <label className="block font-semibold text-slate-800">
-                  Resource Image (Supabase Storage: resource-images)
+                  Resource Image (Uploads via <code>uploadResourceImage()</code>)
                 </label>
 
                 <div className="flex items-center gap-4">
@@ -583,12 +584,12 @@ export const OwnerDashboardPage: React.FC = () => {
                   <div className="flex-1 space-y-1">
                     <input
                       type="file"
-                      accept="image/jpeg,image/png,image/webp"
+                      accept="image/jpeg,image/png,image/webp,image/gif"
                       onChange={handleFileChange}
                       className="block w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-navy-900 file:text-white hover:file:bg-navy-800 cursor-pointer"
                     />
                     <p className="text-[10px] text-slate-400">
-                      PNG, JPEG, or WebP up to 5MB. Uploads via <code>uploadResourceImage()</code>.
+                      JPEG, PNG, WebP or GIF up to 5MB. Verified by backend service layer.
                     </p>
                   </div>
                 </div>
