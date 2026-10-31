@@ -236,10 +236,10 @@ In real laboratory environments, reservations often involve non-identical, parti
    When an approved or waitlisted booking is cancelled or rejected, `public.recalculate_waitlist(resource_id)` dynamically re-evaluates the connected clusters and compacts remaining requests sequentially without gaps.
 
 ### 4.2 Strict FIFO Enforcement on Approval
-To maintain fairness and prevent queue jumping:
-- **Waitlisted Approval Rule:** An owner or administrator **cannot approve** a waitlisted booking if there exists another earlier-submitted waitlisted booking on that resource whose scheduled interval overlaps with the candidate.
-- **Pending Approval Rule:** An owner **cannot approve** a newly submitted `pending` booking if an earlier `waitlisted` booking exists for an overlapping timeframe.
-- **Violation Outcome:** Throws exception with code `P0001` (`FIFO fairness violation: Earlier waitlisted request exists for this overlapping timeframe. Waitlisted requests must be approved in FIFO order.`).
+To maintain fairness and prevent queue jumping, `approve_booking` enforces strictly deterministic connected-cluster queue order:
+- **Waitlisted Approval Rule:** An owner or administrator **cannot approve** a waitlisted booking if there exists another earlier-submitted waitlisted booking in the same connected-overlap cluster (i.e. `v_booking.waitlist_position > 1`). In an A-B-C chained interval (where A overlaps B, and B overlaps C), Candidate C cannot bypass Candidate A or B; only the candidate holding position 1 in that connected cluster can be approved.
+- **Pending Approval Rule:** An owner **cannot approve** a newly submitted `pending` booking if an earlier `waitlisted` cluster exists whose connected interval span intersects with the candidate request.
+- **Violation Outcome:** Throws exception with code `P0001` (`FIFO fairness violation: Earlier waitlisted request exists for this connected cluster. Waitlisted requests must be approved in FIFO order.`).
 
 ---
 

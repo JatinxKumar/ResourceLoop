@@ -14,28 +14,29 @@
 --    Extension functions (gen_random_bytes, digest, encode) are explicitly resolved
 --    under the extensions schema.
 -- 3. Extension Management: Ensures extensions schema exists, installs btree_gist
---    and pgcrypto in extensions schema, and relocates any legacy public installations.
+--    and pgcrypto in extensions schema, and safely relocates any legacy public installations.
 -- 4. Scheduled Overlap Prevention: Safe check of existing data before adding the
 --    no_overlapping_scheduled_bookings exclusion constraint (no unconditional drops).
 -- 5. Active Custody Protection: Shared resource-level transaction lock
 --    (pg_advisory_xact_lock on resource_custody) acquired before evaluating custody.
 --    An unreturned 'checked_in' or 'overdue' booking strictly blocks new approvals
 --    and check-ins until physical checkout is completed, even if scheduled end time has passed.
--- 6. Deterministic Connected-Cluster FIFO Waitlist: Evaluated per resource across
---    connected overlapping interval chains. Requests in connected clusters receive
---    strictly sequential, deterministic FIFO positions (1, 2, 3...) ordered by
---    (created_at ASC, id ASC). Independent intervals maintain isolated queues.
---    FIFO priority is strictly enforced on approval: earlier waitlisted requests
---    cannot be bypassed.
+-- 6. Connected Interval Cluster FIFO Queue & Approval Enforcement:
+--    Evaluated per resource across connected overlapping interval chains. Requests
+--    in connected clusters receive strictly sequential, deterministic FIFO positions
+--    (1, 2, 3...) ordered by (created_at ASC, id ASC). Independent intervals maintain
+--    isolated queues. FIFO priority is strictly enforced on approval: earlier requests
+--    in a connected cluster cannot be bypassed by later chained requests.
 -- 7. Shared Custody Lock in Maintenance: mark_overdue_bookings() acquires the shared
 --    resource-custody advisory lock and rechecks status under lock.
 -- 8. Seeker-Only QR Pass Generation: generate_booking_pass() strictly restricts token
 --    generation to the booking requester (auth.uid() = requester_id). Returns symmetric
 --    token and raw_token payload with ISO expiration.
 -- 9. Complete Verification Return Contract: verify_check_in() and verify_check_out()
---    return the full public.bookings row with parameter names matching the frontend DTO.
+--    return the full public.bookings row with parameter names (p_raw_token, p_condition_status,
+--    p_condition_notes, p_image_url) matching the frontend DTO.
 -- 10. Audit Logging & Human Governance: Full audit trail matching public.audit_logs.
---    Automatic damage incident flagging with human-only resolution and penalty review.
+--     Automatic damage incident flagging with human-only resolution and penalty review.
 -- ==============================================================================
 
 -- ------------------------------------------------------------------------------
@@ -46,7 +47,8 @@ CREATE SCHEMA IF NOT EXISTS extensions;
 CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 
--- Safely relocate pgcrypto or btree_gist if installed in public by earlier scripts
+-- Safely relocate pgcrypto or btree_gist if installed in public by earlier scripts.
+-- Wrapped in exception handlers so migration role permissions never fail the script.
 DO $$
 BEGIN
     IF EXISTS (
@@ -54,7 +56,11 @@ BEGIN
         JOIN pg_namespace n ON e.extnamespace = n.oid
         WHERE e.extname = 'pgcrypto' AND n.nspname = 'public'
     ) THEN
-        ALTER EXTENSION pgcrypto SET SCHEMA extensions;
+        BEGIN
+            ALTER EXTENSION pgcrypto SET SCHEMA extensions;
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE NOTICE 'Extension pgcrypto is in schema public; relocation skipped due to role privileges.';
+        END;
     END IF;
 
     IF EXISTS (
@@ -62,7 +68,11 @@ BEGIN
         JOIN pg_namespace n ON e.extnamespace = n.oid
         WHERE e.extname = 'btree_gist' AND n.nspname = 'public'
     ) THEN
-        ALTER EXTENSION btree_gist SET SCHEMA extensions;
+        BEGIN
+            ALTER EXTENSION btree_gist SET SCHEMA extensions;
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE NOTICE 'Extension btree_gist is in schema public; relocation skipped due to role privileges.';
+        END;
     END IF;
 END $$;
 
@@ -114,6 +124,36 @@ WHERE status IN ('checked_in', 'overdue');
 CREATE INDEX IF NOT EXISTS idx_bookings_waitlist 
 ON public.bookings(resource_id, waitlist_position) 
 WHERE status = 'waitlisted';
+
+-- ------------------------------------------------------------------------------
+-- 2b. SCHEMA ADDITIONS: public.condition_reports
+-- Ensure unique constraint on (booking_id, report_type) exists for atomic
+-- ON CONFLICT upserts in verify_check_in() and verify_check_out().
+-- ------------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON c.conrelid = t.oid
+        JOIN pg_namespace n ON t.relnamespace = n.oid
+        WHERE n.nspname = 'public'
+          AND t.relname = 'condition_reports'
+          AND c.contype = 'u'
+          AND (
+              SELECT array_agg(a.attname ORDER BY a.attnum)
+              FROM unnest(c.conkey) k
+              JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k
+          ) = ARRAY['booking_id', 'report_type']
+    ) THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'unique_booking_report_stage'
+        ) THEN
+            ALTER TABLE public.condition_reports
+            ADD CONSTRAINT unique_booking_report_stage UNIQUE (booking_id, report_type);
+        END IF;
+    END IF;
+END $$;
 
 -- ------------------------------------------------------------------------------
 -- 3. SCHEMA: public.booking_access_tokens
@@ -360,8 +400,10 @@ GRANT EXECUTE ON FUNCTION public.request_booking(UUID, TIMESTAMPTZ, TIMESTAMPTZ,
 -- Active Custody Protection: An unreturned 'checked_in' or 'overdue' booking
 -- strictly blocks new approvals until physical checkout is completed, even if its
 -- scheduled end time has passed.
--- FIFO Fairness: Enforces strictly deterministic FIFO approval order for waitlisted
--- requests; earlier waitlisted overlapping requests cannot be bypassed.
+-- FIFO Fairness: Enforces strictly deterministic FIFO approval order using the
+-- EXACT SAME connected-overlap-cluster semantics as recalculate_waitlist().
+-- In a chained interval A-B-C, C cannot bypass A, and requests must be approved
+-- in FIFO order (position 1 first).
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.approve_booking(p_booking_id UUID)
 RETURNS public.bookings
@@ -420,40 +462,106 @@ BEGIN
         USING ERRCODE = 'P0001';
     END IF;
 
-    -- Enforce FIFO Queue Fairness:
-    -- If approving a waitlisted booking, ensure no earlier waitlisted request on this resource
-    -- with an overlapping scheduled timeframe exists.
+    -- Connected Interval Cluster FIFO Fairness Enforcement:
+    -- If approving a waitlisted booking, ensure it is at position 1 in its connected cluster.
+    -- Later chained requests (e.g. C in an A-B-C chain) cannot bypass earlier requests (A or B).
     IF v_booking.status = 'waitlisted' THEN
-        SELECT id INTO v_prior_waitlisted_id
-        FROM public.bookings
-        WHERE resource_id = v_booking.resource_id
-          AND id <> v_booking.id
-          AND status = 'waitlisted'
-          AND (created_at < v_booking.created_at OR (created_at = v_booking.created_at AND id < v_booking.id))
-          AND tstzrange(start_time, end_time, '[)') && tstzrange(v_booking.start_time, v_booking.end_time, '[)')
-        ORDER BY created_at ASC, id ASC
+        -- Recalculate waitlist first under lock to ensure fresh, accurate cluster positions
+        PERFORM public.recalculate_waitlist(v_booking.resource_id);
+
+        WITH sorted_intervals AS (
+            SELECT 
+                id,
+                start_time,
+                end_time,
+                created_at,
+                MAX(end_time) OVER (
+                    ORDER BY start_time ASC, end_time DESC, created_at ASC, id ASC
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                ) AS prev_max_end
+            FROM public.bookings
+            WHERE resource_id = v_booking.resource_id
+              AND status = 'waitlisted'
+        ),
+        clustered AS (
+            SELECT 
+                id,
+                created_at,
+                SUM(CASE WHEN prev_max_end IS NULL OR start_time >= prev_max_end THEN 1 ELSE 0 END) OVER (
+                    ORDER BY start_time ASC, end_time DESC, created_at ASC, id ASC
+                    ROWS UNBOUNDED PRECEDING
+                ) AS cluster_id
+            FROM sorted_intervals
+        ),
+        ranked AS (
+            SELECT 
+                id,
+                cluster_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY cluster_id 
+                    ORDER BY created_at ASC, id ASC
+                ) AS new_pos
+            FROM clustered
+        )
+        SELECT r1.id INTO v_prior_waitlisted_id
+        FROM ranked r1
+        JOIN ranked r2 ON r1.cluster_id = r2.cluster_id
+        WHERE r2.id = v_booking.id
+          AND r1.new_pos < r2.new_pos
+        ORDER BY r1.new_pos ASC
         LIMIT 1;
 
         IF v_prior_waitlisted_id IS NOT NULL THEN
-            RAISE EXCEPTION 'FIFO fairness violation: Earlier waitlisted request % exists for this overlapping timeframe. Waitlisted requests must be approved in FIFO order.', v_prior_waitlisted_id
+            RAISE EXCEPTION 'FIFO fairness violation: Earlier waitlisted request % has priority in the connected waitlist cluster (position 1). Waitlisted requests must be approved in FIFO order.', v_prior_waitlisted_id
             USING ERRCODE = 'P0001';
         END IF;
     END IF;
 
-    -- If approving a pending booking, ensure no earlier waitlisted request exists for overlapping timeframe
+    -- If approving a pending booking, ensure no waitlisted cluster overlaps the candidate interval
     IF v_booking.status = 'pending' THEN
-        SELECT id INTO v_prior_waitlisted_id
-        FROM public.bookings
-        WHERE resource_id = v_booking.resource_id
-          AND id <> v_booking.id
-          AND status = 'waitlisted'
-          AND (created_at < v_booking.created_at OR (created_at = v_booking.created_at AND id < v_booking.id))
-          AND tstzrange(start_time, end_time, '[)') && tstzrange(v_booking.start_time, v_booking.end_time, '[)')
-        ORDER BY created_at ASC, id ASC
+        WITH sorted_intervals AS (
+            SELECT 
+                id,
+                start_time,
+                end_time,
+                created_at,
+                MAX(end_time) OVER (
+                    ORDER BY start_time ASC, end_time DESC, created_at ASC, id ASC
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                ) AS prev_max_end
+            FROM public.bookings
+            WHERE resource_id = v_booking.resource_id
+              AND status = 'waitlisted'
+        ),
+        clustered AS (
+            SELECT 
+                id,
+                start_time,
+                end_time,
+                created_at,
+                SUM(CASE WHEN prev_max_end IS NULL OR start_time >= prev_max_end THEN 1 ELSE 0 END) OVER (
+                    ORDER BY start_time ASC, end_time DESC, created_at ASC, id ASC
+                    ROWS UNBOUNDED PRECEDING
+                ) AS cluster_id
+            FROM sorted_intervals
+        ),
+        cluster_spans AS (
+            SELECT 
+                cluster_id,
+                MIN(start_time) AS c_start,
+                MAX(end_time) AS c_end
+            FROM clustered
+            GROUP BY cluster_id
+        )
+        SELECT c.id INTO v_prior_waitlisted_id
+        FROM clustered c
+        JOIN cluster_spans s ON c.cluster_id = s.cluster_id
+        WHERE tstzrange(v_booking.start_time, v_booking.end_time, '[)') && tstzrange(s.c_start, s.c_end, '[)')
+        ORDER BY c.created_at ASC, c.id ASC
         LIMIT 1;
 
         IF v_prior_waitlisted_id IS NOT NULL THEN
-            RAISE EXCEPTION 'FIFO fairness violation: Prior waitlisted reservation % exists for this overlapping timeframe. Waitlist queue has priority over newly pending requests.', v_prior_waitlisted_id
+            RAISE EXCEPTION 'FIFO fairness violation: Prior waitlisted reservation % exists for this connected timeframe. Waitlist queue has priority over newly pending requests.', v_prior_waitlisted_id
             USING ERRCODE = 'P0001';
         END IF;
     END IF;
@@ -499,7 +607,7 @@ GRANT EXECUTE ON FUNCTION public.approve_booking(UUID) TO authenticated, service
 
 -- ------------------------------------------------------------------------------
 -- 7. RPC 3: reject_booking
--- Rejects a booking with mandatory reason. Recalculates waitlist.
+-- Rejects a booking with mandatory reason (p_rejection_reason). Recalculates waitlist.
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.reject_booking(
     p_booking_id UUID,
@@ -852,6 +960,7 @@ GRANT EXECUTE ON FUNCTION public.generate_booking_pass(UUID, TEXT) TO authentica
 -- ------------------------------------------------------------------------------
 -- 11. RPC 7: verify_check_in
 -- Physical QR Handshake: Seeker displays token, Authenticated Custodian scans and verifies.
+-- Parameters match frontend VerifyHandshakeDTO: (p_raw_token, p_condition_status, p_condition_notes, p_image_url).
 -- Shared resource custody lock acquired FIRST before checking active custody.
 -- Custody rechecked under lock to guarantee concurrent check-ins cannot both succeed.
 -- Active custody blocks check-ins if another booking is checked_in or overdue.
@@ -1009,6 +1118,7 @@ GRANT EXECUTE ON FUNCTION public.verify_check_in(TEXT, TEXT, TEXT, TEXT) TO auth
 -- ------------------------------------------------------------------------------
 -- 12. RPC 8: verify_check_out
 -- Physical QR Return Handshake: Seeker returns asset, Owner verifies and checks out.
+-- Parameters match frontend VerifyHandshakeDTO: (p_raw_token, p_condition_status, p_condition_notes, p_image_url).
 -- Resolves booking SOLELY from token hash. Atomically records post-condition report.
 -- Automatically logs an open incident if damaged or faulty.
 -- Releases active custody protection (status becomes 'returned').

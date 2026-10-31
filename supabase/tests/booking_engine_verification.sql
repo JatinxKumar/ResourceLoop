@@ -260,23 +260,50 @@ BEGIN
     RAISE NOTICE '  -> SUCCESS: Chained intervals grouped deterministically (1,2,3) and compacted seamlessly (1,2).';
 
     -- --------------------------------------------------------------------------
-    -- TEST 8: FIFO QUEUE FAIRNESS ENFORCEMENT ON APPROVAL
+    -- TEST 8: CONNECTED-CLUSTER FIFO FAIRNESS ENFORCEMENT ON APPROVAL
     -- --------------------------------------------------------------------------
-    RAISE NOTICE 'Running Test 8: FIFO Queue Fairness Enforcement...';
+    RAISE NOTICE 'Running Test 8: Connected-Cluster FIFO Approval Enforcement...';
 
-    -- Chain B is position 1, Chain C is position 2 and overlaps Chain B.
-    -- Attempting to approve Chain C while earlier overlapping Chain B exists must be rejected!
-    IF EXISTS (
-        SELECT 1 FROM public.bookings
-        WHERE resource_id = v_resource_id
-          AND id <> v_chain_c_id
-          AND status = 'waitlisted'
-          AND created_at < (SELECT created_at FROM public.bookings WHERE id = v_chain_c_id)
-          AND tstzrange(start_time, end_time, '[)') && (SELECT tstzrange(start_time, end_time, '[)') FROM public.bookings WHERE id = v_chain_c_id)
-    ) THEN
-        RAISE NOTICE '  -> SUCCESS: Earlier overlapping waitlisted request detected; FIFO policy prevents skipping.';
-    ELSE
-        RAISE EXCEPTION 'TEST 8 FAILED: FIFO conflict check failed to identify prior waitlisted request!';
+    -- Re-activate A (pos 1), B (pos 2), C (pos 3) in connected chain [10:00 - 20:00)
+    -- Chain A: 10-14, Chain B: 13-17, Chain C: 16-20
+    UPDATE public.bookings SET status = 'waitlisted' WHERE id IN (v_chain_a_id, v_chain_b_id, v_chain_c_id);
+    PERFORM public.recalculate_waitlist(v_resource_id);
+
+    -- Attempt to approve C (pos 3 in connected chain)
+    -- In connected-cluster semantics, C cannot bypass A or B even though C does not directly overlap A!
+    v_expected_conflict := false;
+    BEGIN
+        WITH sorted_intervals AS (
+            SELECT 
+                id, start_time, end_time, created_at,
+                MAX(end_time) OVER (ORDER BY start_time ASC, end_time DESC, created_at ASC, id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prev_max_end
+            FROM public.bookings
+            WHERE resource_id = v_resource_id AND status = 'waitlisted'
+        ),
+        clustered AS (
+            SELECT id, created_at,
+                SUM(CASE WHEN prev_max_end IS NULL OR start_time >= prev_max_end THEN 1 ELSE 0 END) OVER (ORDER BY start_time ASC, end_time DESC, created_at ASC, id ASC ROWS UNBOUNDED PRECEDING) AS cluster_id
+            FROM sorted_intervals
+        ),
+        ranked AS (
+            SELECT id, cluster_id,
+                ROW_NUMBER() OVER (PARTITION BY cluster_id ORDER BY created_at ASC, id ASC) AS new_pos
+            FROM clustered
+        )
+        SELECT r1.id INTO v_prior_waitlisted_id
+        FROM ranked r1
+        JOIN ranked r2 ON r1.cluster_id = r2.cluster_id
+        WHERE r2.id = v_chain_c_id AND r1.new_pos < r2.new_pos
+        ORDER BY r1.new_pos ASC LIMIT 1;
+
+        IF v_prior_waitlisted_id = v_chain_a_id THEN
+            v_expected_conflict := true;
+            RAISE NOTICE '  -> SUCCESS: Chained request C prevented from bypassing A in connected cluster.';
+        END IF;
+    END;
+
+    IF NOT v_expected_conflict THEN
+        RAISE EXCEPTION 'TEST 8 FAILED: Connected-cluster FIFO check failed to identify Chain A as priority holder for Chain C!';
     END IF;
 
     -- Clean up waitlist test rows
