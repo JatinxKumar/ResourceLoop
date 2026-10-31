@@ -134,6 +134,10 @@ export interface ResourceAvailabilityInfo {
     end: string;
     reason: string;
   }>;
+  is_donation?: boolean;
+  condition_status?: ConditionStatus;
+  estimated_value?: number;
+  transfer_terms?: string;
 }
 
 /**

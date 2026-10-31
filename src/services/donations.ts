@@ -17,7 +17,7 @@ import { requestBooking, approveBooking, rejectBooking, getBookingById } from '.
 
 /**
  * Creates a donation / surplus asset listing for permanent transfer.
- * Restricted to verified owners or platform administrators.
+ * Strictly restricted to verified owners or platform administrators.
  */
 export async function createDonationListing(dto: CreateDonationDTO): Promise<Resource> {
   const profile = await getCurrentProfile();
@@ -152,6 +152,21 @@ export async function requestDonation(dto: RequestDonationDTO): Promise<Booking>
     throw new Error('Forbidden: You must be affiliated with an institution to request surplus equipment');
   }
 
+  // Fetch resource to verify availability and retrieve owner for notification
+  const { data: resource, error: resError } = await supabase
+    .from('resources')
+    .select('id, title, status, owner_id, availability_info')
+    .eq('id', dto.resource_id)
+    .single();
+
+  if (resError || !resource) {
+    throw new Error('Donation asset not found');
+  }
+
+  if (resource.status !== 'available') {
+    throw new Error(`Asset is not available for donation (current status: ${resource.status})`);
+  }
+
   // Set a standard 14-day transfer window for the donation allocation request
   const startTime = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   const endTime = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
@@ -167,40 +182,94 @@ export async function requestDonation(dto: RequestDonationDTO): Promise<Booking>
     purpose: formattedPurpose,
   });
 
+  // Notify donor owner
+  await supabase.from('notifications').insert({
+    user_id: resource.owner_id,
+    title: 'New Donation Request Received',
+    message: `${profile.full_name || 'A researcher'} submitted a claim request for surplus equipment "${resource.title}".`,
+    link_url: '/owner/bookings',
+  });
+
   return booking;
 }
 
 /**
  * Accepts a donation transfer request.
- * Approves the booking and marks the resource as unavailable to conclude the donation lifecycle.
+ * Enforces ownership verification, booking authorization, resource lifecycle retirement,
+ * recipient notification, and immutable audit logging.
  */
 export async function acceptDonation(bookingId: string): Promise<Booking> {
+  if (!bookingId) throw new Error('Booking ID is required');
+
+  const profile = await getCurrentProfile();
+  if (!profile) {
+    throw new Error('Unauthorized: Authentication required to accept donation');
+  }
+
   const booking = await getBookingById(bookingId);
   if (!booking) {
     throw new Error('Booking not found');
   }
 
-  // Approve through the core engine
+  // Check 1: Ownership Verification
+  const resource = booking.resource;
+  if (!resource) {
+    throw new Error('Associated resource not found');
+  }
+
+  const isOwner = resource.owner_id === profile.id;
+  const isAdmin = profile.role === 'admin';
+  if (!isOwner && !isAdmin) {
+    throw new Error('Forbidden: Only the resource owner or an administrator can accept a donation request');
+  }
+
+  // Check 2: Verify booking status is pending or waitlisted
+  if (booking.status !== 'pending' && booking.status !== 'waitlisted') {
+    throw new Error(`Cannot accept donation: Booking is in "${booking.status}" status, must be "pending" or "waitlisted"`);
+  }
+
+  // Check 3: Verify resource is flagged as donation
+  const isDonation = resource.availability_info?.is_donation === true ||
+                     booking.purpose.includes('[DONATION_CLAIM]');
+  if (!isDonation) {
+    throw new Error('Resource or booking is not marked as a surplus donation');
+  }
+
+  // Check 4: Approve through the core booking engine (enforces advisory custody locks, FIFO, and exclusion)
   const approved = await approveBooking(bookingId);
 
-  // Mark the resource as unavailable / completed transfer so it leaves the active catalogue
-  await supabase
+  // Check 5: Update resource lifecycle to 'unavailable' (so it cannot be re-requested or booked)
+  const { error: resourceUpdateError } = await supabase
     .from('resources')
     .update({ status: 'unavailable', updated_at: new Date().toISOString() })
     .eq('id', booking.resource_id);
 
-  // Insert audit record
-  const profile = await getCurrentProfile();
+  if (resourceUpdateError) {
+    console.error('[acceptDonation] Failed to retire resource:', resourceUpdateError.message);
+    throw new Error(`Failed to update resource lifecycle status: ${resourceUpdateError.message}`);
+  }
+
+  // Check 6: Immutable compliance audit logging
   await supabase.from('audit_logs').insert({
-    actor_id: profile?.id || null,
+    actor_id: profile.id,
     action: 'DONATION_TRANSFER_ACCEPTED',
     entity_type: 'resource',
     entity_id: booking.resource_id,
     details: {
       booking_id: bookingId,
       recipient_id: booking.requester_id,
+      donor_id: resource.owner_id,
+      accepted_by: profile.id,
       accepted_at: new Date().toISOString(),
     },
+  });
+
+  // Check 7: Recipient notification
+  await supabase.from('notifications').insert({
+    user_id: booking.requester_id,
+    title: 'Donation Request Approved',
+    message: `Your donation claim for "${resource.title}" has been accepted! Please coordinate asset transfer with the donor.`,
+    link_url: '/seeker/bookings',
   });
 
   return approved;

@@ -150,9 +150,11 @@ import {
 ```typescript
 import {
   reportIncident,
-  getIncidents,
+  fetchIncidents,
+  getIncidents, // canonical alias for fetchIncidents
   getIncidentById,
-  updateIncidentStatus,
+  resolveIncident,
+  updateIncidentStatus, // canonical alias for resolveIncident
   reviewPenalty,
 } from '../services/incidents';
 ```
@@ -162,9 +164,9 @@ import {
 | Function | Parameters | Return Type | Description |
 | :--- | :--- | :--- | :--- |
 | **`reportIncident`** | `dto: CreateIncidentDTO` | `Promise<Incident>` | Reports safety hazard, damage, or late return against an asset or booking. |
-| **`getIncidents`** | `filters?: IncidentFilters` | `Promise<Incident[]>` | Queries incidents with joins to booking, resource, and reporting researcher. |
+| **`fetchIncidents`** *(canonical)* | `filters?: IncidentFilters` | `Promise<Incident[]>` | Queries incidents with joins to booking, resource, and reporting researcher. Alias: `getIncidents`. |
 | **`getIncidentById`** | `id: string` | `Promise<Incident \| null>` | Retrieves full incident dossier including before/after condition reports. |
-| **`updateIncidentStatus`**| `id: string, dto: ResolveIncidentDTO` | `Promise<Incident>` | Updates investigation status and attaches resolution notes. |
+| **`resolveIncident`** *(canonical)* | `incidentId: string, dto: ResolveIncidentDTO` | `Promise<Incident>` | Updates investigation status and attaches resolution notes. Alias: `updateIncidentStatus`. |
 | **`reviewPenalty`** | `dto: ReviewPenaltyDTO` | `Promise<Incident>` | **Human Review of Penalties**: Administrator reviews damages/delays, makes discretionary decision (`waived`, `warning`, `restitution_required`, `privilege_suspended`), audits decision, and notifies borrower. |
 
 ---
@@ -174,6 +176,7 @@ import {
 ```typescript
 import {
   getUserNotifications,
+  fetchUserNotifications, // canonical alias for getUserNotifications
   getUnreadNotificationCount,
   markNotificationAsRead,
   markAllNotificationsAsRead,
@@ -186,7 +189,7 @@ import {
 
 | Function | Parameters | Return Type | Description |
 | :--- | :--- | :--- | :--- |
-| **`getUserNotifications`** | `userId?: string, limit?: number` | `Promise<Notification[]>` | Retrieves user alerts and reminders in reverse chronological order. |
+| **`fetchUserNotifications`** *(canonical)* | *none* | `Promise<Notification[]>` | Retrieves current user notifications in reverse chronological order. Alias: `getUserNotifications`. |
 | **`getUnreadNotificationCount`** | `userId?: string` | `Promise<number>` | Fast exact head count for top navigation notification badge. |
 | **`markNotificationAsRead`** | `notificationId: string` | `Promise<void>` | Marks specific notification as read. |
 | **`markAllNotificationsAsRead`** | `userId?: string` | `Promise<void>` | Bulk dismisses all unread alerts for current user. |
@@ -221,11 +224,16 @@ import {
 
 ```typescript
 import {
+  getAdminPlatformTelemetry,
+  getPlatformOverview, // alias for getAdminPlatformTelemetry
+  fetchAdminAuditLogs,
+  fetchAdminUsers,
+  listAllUsers, // alias for fetchAdminUsers
+  updateOrganizationVerification, // canonical name
+  verifyOrganization, // canonical alias for updateOrganizationVerification
   listAllOrganizations,
-  verifyOrganization,
-  listAllUsers,
   updateUserRole,
-  getPlatformOverview,
+  type PlatformTelemetry,
 } from '../services/admin';
 ```
 
@@ -233,11 +241,12 @@ import {
 
 | Function | Parameters | Return Type | Description |
 | :--- | :--- | :--- | :--- |
+| **`getAdminPlatformTelemetry`** *(canonical)* | *none* | `Promise<PlatformTelemetry>` | Central platform telemetry and live counts. Alias: `getPlatformOverview`. |
+| **`fetchAdminAuditLogs`** | `limit?: number` | `Promise<AuditLog[]>` | Administrative audit trail query with actor profile expansion. |
+| **`fetchAdminUsers`** *(canonical)* | `role?: UserRole` | `Promise<Profile[]>` | Governance directory of all registered researchers and managers. Alias: `listAllUsers`. |
+| **`updateOrganizationVerification`** *(canonical)* | `orgId: string, status: 'verified' \| 'rejected' \| 'pending'` | `Promise<Organization>` | Admin approval/rejection of institution enrollment; logs to audit trail. Alias: `verifyOrganization`. |
 | **`listAllOrganizations`** | `status?: OrganizationVerificationStatus` | `Promise<Organization[]>` | Administrative overview of all enrolled institutional entities. |
-| **`verifyOrganization`** | `organizationId: string, status: 'verified' \| 'rejected'` | `Promise<Organization>` | Admin approval/rejection of institution enrollment; logs to audit trail. |
-| **`listAllUsers`** | `role?: UserRole` | `Promise<Profile[]>` | Governance directory of all registered researchers and managers. |
 | **`updateUserRole`** | `userId: string, newRole: UserRole` | `Promise<Profile>` | Assigns user access role ('seeker', 'owner', 'admin') adhering to trigger guard. |
-| **`getPlatformOverview`** | *none* | `Promise<{ ... counts }>` | Central telemetry overview with real counts across all core tables. |
 
 ---
 

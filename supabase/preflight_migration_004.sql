@@ -16,6 +16,11 @@ DECLARE
     v_pgcrypto_installed BOOLEAN := false;
     v_btree_gist_schema TEXT;
     v_pgcrypto_schema TEXT;
+    v_bookings_rls_enabled BOOLEAN := false;
+    v_incidents_rls_enabled BOOLEAN := false;
+    v_notifications_rls_enabled BOOLEAN := false;
+    v_audit_logs_rls_enabled BOOLEAN := false;
+    v_donation_resources_count INTEGER := 0;
     v_can_proceed BOOLEAN := true;
 BEGIN
     RAISE NOTICE '==============================================================';
@@ -90,6 +95,26 @@ BEGIN
 
     RAISE NOTICE '[INFO] btree_gist installed: %, schema: %', v_btree_gist_installed, COALESCE(v_btree_gist_schema, 'not installed');
     RAISE NOTICE '[INFO] pgcrypto installed: %, schema: %', v_pgcrypto_installed, COALESCE(v_pgcrypto_schema, 'not installed');
+
+    -- --------------------------------------------------------------------------
+    -- CHECK 5: Verify Row Level Security Activation
+    -- --------------------------------------------------------------------------
+    SELECT relrowsecurity INTO v_bookings_rls_enabled FROM pg_class WHERE oid = 'public.bookings'::regclass;
+    SELECT relrowsecurity INTO v_incidents_rls_enabled FROM pg_class WHERE oid = 'public.incidents'::regclass;
+    SELECT relrowsecurity INTO v_notifications_rls_enabled FROM pg_class WHERE oid = 'public.notifications'::regclass;
+    SELECT relrowsecurity INTO v_audit_logs_rls_enabled FROM pg_class WHERE oid = 'public.audit_logs'::regclass;
+
+    RAISE NOTICE '[INFO] RLS status: bookings=%, incidents=%, notifications=%, audit_logs=%',
+        v_bookings_rls_enabled, v_incidents_rls_enabled, v_notifications_rls_enabled, v_audit_logs_rls_enabled;
+
+    -- --------------------------------------------------------------------------
+    -- CHECK 6: Donation Metadata Compatibility
+    -- --------------------------------------------------------------------------
+    SELECT COUNT(*) INTO v_donation_resources_count
+    FROM public.resources
+    WHERE (availability_info->>'is_donation')::boolean = true;
+
+    RAISE NOTICE '[INFO] Resource donation metadata compatibility verified. Active donation listings: %', v_donation_resources_count;
 
     -- --------------------------------------------------------------------------
     -- PREFLIGHT SUMMARY
