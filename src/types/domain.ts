@@ -313,10 +313,13 @@ export interface UpdateProfileDTO {
  */
 export interface ResourceFilters {
   query?: string;
+  search?: string;
   category?: string;
   resource_type?: ResourceType;
+  resourceType?: ResourceType | 'all';
   organization_id?: string;
-  status?: ResourceStatus;
+  organizationId?: string;
+  status?: ResourceStatus | 'all';
   available_only?: boolean;
   training_required?: boolean;
   limit?: number;

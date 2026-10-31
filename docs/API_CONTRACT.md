@@ -34,7 +34,7 @@ import {
 | **`createResource`** | `input: CreateResourceDTO` | `Promise<Resource>` | Register new institutional asset (restricted to authorized owners/admins). |
 | **`updateResource`** | `id: string, input: UpdateResourceDTO` | `Promise<Resource>` | Update resource specifications (restricted to asset owner/admin). |
 | **`deleteResource`** | `id: string` | `Promise<void>` | Delete resource (restricted to asset owner/admin). |
-| **`getOwnerResources`** | *none* | `Promise<Resource[]>` | Retrieve all resources managed by currently authenticated owner. |
+| **`getOwnerResources`** | `ownerId?: string` | `Promise<Resource[]>` | Retrieve all resources managed by owner (defaults to authenticated user). |
 | **`getAvailableResources`**| *none* | `Promise<Resource[]>` | Quick helper returning all resources with `status = 'available'`. |
 | **`uploadResourceImage`**| `file: File, organizationId: string` | `Promise<string>` | Upload image to `resource-images` bucket and return public URL. |
 | **`checkResourceEligibility`**| `resourceId: string, userId?: string` | `Promise<ResourceEligibilityResult>` | Reusable check for operational status, training, and affiliation. |
@@ -185,7 +185,7 @@ ResourceLoop uses Supabase Storage for equipment and laboratory imagery.
 - **Upload Restrictions:**
   - Authenticated users with `role IN ('owner', 'admin')`.
   - Max file size: **5 MB**.
-  - Permitted MIME types: `image/jpeg`, `image/png`, `image/webp`, `image/gif`, `image/svg+xml`.
+  - Permitted MIME types: `image/jpeg`, `image/png`, `image/webp`. (SVG and GIF are restricted for security against script injection / XSS).
 - **Path Convention:** `<organization_id>/<timestamp>-<random_key>.<ext>`
 - **Deletions:** Restricted to the asset uploader or platform administrators.
 
@@ -229,3 +229,30 @@ stateDiagram-v2
 2. **Resource Ownership**: Owners can only manage resources belonging to their organization. Seekers cannot mutate resource data.
 3. **Audit Trail**: All booking creation and status updates are logged immutably in `audit_logs`.
 4. **RLS Verification**: Never disable RLS in client queries. Authenticated sessions rely on the Supabase JWT.
+5. **Storage Sanitization**: Executable and scriptable formats (SVG, HTML, JS) are rejected at both client and storage policy levels.
+
+---
+
+## 6. Supabase Setup & Demo Accounts
+
+### 6.1 Applying Migration 002 (Non-destructive)
+1. Open the Supabase Dashboard: **SQL Editor**.
+2. Run `supabase/migrations/002_resource_management.sql`.
+   - The script creates or updates the `resource-images` bucket safely via `ON CONFLICT (id) DO UPDATE`.
+   - No existing storage objects or records are dropped or altered destructively.
+
+### 6.2 Creating Real Authenticated Demo Accounts
+To test all roles with real Supabase Auth:
+1. Sign up users via the app's Signup Page or Supabase Auth Dashboard (**Authentication > Users > Add user**).
+2. To assign an **`owner`** or **`admin`** role, run this in the Supabase **SQL Editor**:
+```sql
+-- Promote a user to owner and link to an institution
+UPDATE public.profiles
+SET role = 'owner', organization_id = '11111111-1111-1111-1111-111111111111'
+WHERE email = 'user-email@institution.edu';
+
+-- Promote a user to platform admin
+UPDATE public.profiles
+SET role = 'admin'
+WHERE email = 'admin-email@institution.edu';
+```

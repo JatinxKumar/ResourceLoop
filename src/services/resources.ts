@@ -15,13 +15,11 @@ import type {
 } from '../types/domain';
 import { getCurrentProfile } from './profiles';
 
-// Supported MIME types for resource image uploads
+// Supported MIME types for resource image uploads (SVG blocked to prevent script injection / XSS)
 const ALLOWED_IMAGE_TYPES = [
   'image/jpeg',
   'image/png',
   'image/webp',
-  'image/gif',
-  'image/svg+xml',
 ];
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
 
@@ -38,10 +36,10 @@ export async function listResources(filters: ResourceFilters = {}): Promise<Reso
       owner:profiles(id, full_name, email, avatar_url)
     `);
 
-  // Text search query across title, description, category, and location
-  if (filters.query && filters.query.trim().length > 0) {
-    const q = filters.query.trim();
-    query = query.or(`title.ilike.%${q}%,description.ilike.%${q}%,category.ilike.%${q}%,location.ilike.%${q}%`);
+  // Text search query across title, description, category, and location (supports both .query and .search)
+  const searchString = (filters.query || filters.search || '').trim();
+  if (searchString.length > 0) {
+    query = query.or(`title.ilike.%${searchString}%,description.ilike.%${searchString}%,category.ilike.%${searchString}%,location.ilike.%${searchString}%`);
   }
 
   // Category filter
@@ -49,20 +47,22 @@ export async function listResources(filters: ResourceFilters = {}): Promise<Reso
     query = query.eq('category', filters.category);
   }
 
-  // Resource type filter ('equipment' | 'space')
-  if (filters.resource_type) {
-    query = query.eq('resource_type', filters.resource_type);
+  // Resource type filter ('equipment' | 'space', supports both resource_type and resourceType)
+  const rType = filters.resource_type || (filters.resourceType !== 'all' ? filters.resourceType : undefined);
+  if (rType) {
+    query = query.eq('resource_type', rType);
   }
 
-  // Organization filter
-  if (filters.organization_id) {
-    query = query.eq('organization_id', filters.organization_id);
+  // Organization filter (supports both organization_id and organizationId)
+  const orgId = filters.organization_id || (filters.organizationId !== 'all' ? filters.organizationId : undefined);
+  if (orgId) {
+    query = query.eq('organization_id', orgId);
   }
 
   // Status / availability filter
   if (filters.available_only) {
     query = query.eq('status', 'available');
-  } else if (filters.status) {
+  } else if (filters.status && filters.status !== 'all') {
     query = query.eq('status', filters.status);
   }
 
@@ -262,12 +262,17 @@ export async function deleteResource(id: string): Promise<void> {
 }
 
 /**
- * Retrieves all resources managed by the currently authenticated owner.
+ * Retrieves all resources managed by an owner.
+ * If ownerId is provided, queries for that user; otherwise defaults to the authenticated user.
  */
-export async function getOwnerResources(): Promise<Resource[]> {
-  const profile = await getCurrentProfile();
-  if (!profile) {
-    return [];
+export async function getOwnerResources(ownerId?: string): Promise<Resource[]> {
+  let targetOwnerId = ownerId;
+  if (!targetOwnerId) {
+    const profile = await getCurrentProfile();
+    if (!profile) {
+      return [];
+    }
+    targetOwnerId = profile.id;
   }
 
   const { data, error } = await supabase
@@ -277,11 +282,11 @@ export async function getOwnerResources(): Promise<Resource[]> {
       organization:organizations(*),
       owner:profiles(id, full_name, email, avatar_url)
     `)
-    .eq('owner_id', profile.id)
+    .eq('owner_id', targetOwnerId)
     .order('created_at', { ascending: false });
 
   if (error) {
-    console.error('[getOwnerResources] Error fetching owner resources:', error.message);
+    console.error(`[getOwnerResources] Error fetching owner resources for ${targetOwnerId}:`, error.message);
     throw new Error(`Failed to retrieve your resources: ${error.message}`);
   }
 
@@ -298,6 +303,7 @@ export async function getAvailableResources(): Promise<Resource[]> {
 /**
  * Uploads an equipment or laboratory image to the 'resource-images' Supabase Storage bucket.
  * Restricts uploads to verified owners or administrators and validates image format and size.
+ * Security notice: SVG is blocked to prevent script injection / XSS.
  *
  * @param file - The image file to upload
  * @param organizationId - The organization owning the resource asset
@@ -313,19 +319,19 @@ export async function uploadResourceImage(file: File, organizationId: string): P
     throw new Error('Forbidden: Only authorized resource owners or administrators can upload images');
   }
 
-  // Validate MIME type
+  // Validate MIME type (JPEG, PNG, WebP only)
   if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
-    throw new Error(`Invalid file format "${file.type}". Allowed formats: JPEG, PNG, WebP, GIF, SVG`);
+    throw new Error(`Invalid file format "${file.type}". Allowed formats: JPEG, PNG, and WebP (SVG and GIF are restricted for security)`);
   }
 
-  // Validate size
+  // Validate size (5MB max)
   if (file.size > MAX_IMAGE_SIZE_BYTES) {
     throw new Error(`File size (${(file.size / (1024 * 1024)).toFixed(2)} MB) exceeds the 5 MB limit`);
   }
 
   // Generate unique and deterministic storage path: <org_id>/<timestamp>-<random>.<ext>
   const fileExt = file.name.split('.').pop()?.toLowerCase() || 'jpg';
-  const cleanOrgId = organizationId.replace(/[^a-zA-Z0-9-]/g, '');
+  const cleanOrgId = organizationId.replace(/[^a-zA-Z0-9-]/g, '') || 'general';
   const uniqueKey = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
   const filePath = `${cleanOrgId}/${uniqueKey}.${fileExt}`;
 
@@ -333,7 +339,7 @@ export async function uploadResourceImage(file: File, organizationId: string): P
     .from('resource-images')
     .upload(filePath, file, {
       cacheControl: '3600',
-      upsert: false,
+      upsert: true,
       contentType: file.type,
     });
 
