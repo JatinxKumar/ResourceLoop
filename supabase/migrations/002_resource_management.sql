@@ -43,12 +43,12 @@ VALUES (
     'resource-images',
     true,
     5242880, -- 5 MB limit
-    ARRAY['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml', 'image/gif']
+    ARRAY['image/jpeg', 'image/png', 'image/webp']
 )
 ON CONFLICT (id) DO UPDATE SET
     public = true,
     file_size_limit = 5242880,
-    allowed_mime_types = ARRAY['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml', 'image/gif'];
+    allowed_mime_types = ARRAY['image/jpeg', 'image/png', 'image/webp'];
 
 -- ------------------------------------------------------------------------------
 -- 4. STORAGE RLS POLICIES FOR resource-images
