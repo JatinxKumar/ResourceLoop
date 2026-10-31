@@ -8,12 +8,14 @@ interface BookingCardProps {
   booking: Booking
   onViewPass?: (booking: Booking) => void
   onCancel?: (id: string) => void
+  onReportIncident?: (booking: Booking) => void
 }
 
 export const BookingCard: React.FC<BookingCardProps> = ({
   booking,
   onViewPass,
-  onCancel
+  onCancel,
+  onReportIncident,
 }) => {
   const resourceTitle = booking.resource?.title || 'Institutional Resource'
   const resourceCategory = booking.resource?.category || 'Equipment'
@@ -99,6 +101,15 @@ export const BookingCard: React.FC<BookingCardProps> = ({
         </Link>
 
         <div className="flex items-center gap-2">
+          {onReportIncident && (
+            <button
+              onClick={() => onReportIncident(booking)}
+              className="px-2.5 py-1.5 text-xs text-amber-700 hover:text-amber-800 hover:bg-amber-50 rounded-lg transition-colors border border-amber-200"
+            >
+              Report Issue
+            </button>
+          )}
+
           {isApproved && onViewPass && (
             <button
               onClick={() => onViewPass(booking)}

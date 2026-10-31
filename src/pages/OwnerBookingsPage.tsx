@@ -20,6 +20,7 @@ import { StatusBadge } from '@/components/common/StatusBadge'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { EmptyState } from '@/components/common/EmptyState'
 import { EligibilityPanel } from '@/components/bookings/EligibilityPanel'
+import { IncidentReportModal } from '@/components/bookings/IncidentReportModal'
 import type { Booking } from '@/types/domain'
 
 type OwnerFilterTab = 'all' | 'pending' | 'approved' | 'active' | 'completed'
@@ -34,6 +35,7 @@ export const OwnerBookingsPage: React.FC = () => {
   const [processingId, setProcessingId] = useState<string | null>(null)
   const [rejectionReason, setRejectionReason] = useState('')
   const [rejectingId, setRejectingId] = useState<string | null>(null)
+  const [incidentBooking, setIncidentBooking] = useState<Booking | null>(null)
 
   const loadBookings = useCallback(async () => {
     if (!user) return
@@ -273,11 +275,16 @@ export const OwnerBookingsPage: React.FC = () => {
                 </div>
               )}
 
-              {/* Incident report — unavailable until backend operation is approved */}
-              {(booking.status === 'checked_in' || booking.status === 'approved') && (
-                <div className="flex items-center gap-2 text-xs text-slate-400 bg-slate-50 border border-dashed border-slate-200 rounded-lg p-2.5 mb-4">
-                  <Ban className="w-3.5 h-3.5 flex-shrink-0" />
-                  <span>Incident reporting will be available once the backend operation is deployed.</span>
+              {/* Incident report button */}
+              {(booking.status === 'checked_in' || booking.status === 'approved' || booking.status === 'overdue') && (
+                <div className="flex items-center justify-between gap-2 text-xs bg-amber-50/50 border border-amber-200/60 rounded-lg p-2.5 mb-4">
+                  <span className="text-amber-800">Observed equipment malfunction, damage, or protocol breach?</span>
+                  <button
+                    onClick={() => setIncidentBooking(booking)}
+                    className="px-2.5 py-1 text-xs font-semibold text-amber-900 bg-amber-100 hover:bg-amber-200 rounded-md transition-colors"
+                  >
+                    File Incident
+                  </button>
                 </div>
               )}
 
@@ -353,6 +360,16 @@ export const OwnerBookingsPage: React.FC = () => {
           description="There are no booking requests matching this filter."
           actionLabel="View All"
           onAction={() => setFilterTab('all')}
+        />
+      )}
+      {/* Incident Report Modal */}
+      {incidentBooking && (
+        <IncidentReportModal
+          isOpen={!!incidentBooking}
+          bookingId={incidentBooking.id}
+          resourceTitle={incidentBooking.resource?.title}
+          onSubmitted={() => loadBookings()}
+          onClose={() => setIncidentBooking(null)}
         />
       )}
     </div>

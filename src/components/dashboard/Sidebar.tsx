@@ -28,6 +28,7 @@ export const Sidebar: React.FC = () => {
     { name: overviewName, href: overviewHref, icon: LayoutDashboard },
     { name: 'Browse Catalog', href: '/resources', icon: Search },
     { name: 'My Bookings', href: '/bookings', icon: CalendarCheck },
+    { name: 'Custodian Pass Scanner', href: '/checkin', icon: ShieldCheck },
     { name: 'Impact & CapEx', href: '/impact', icon: BarChart3 },
   ]
 

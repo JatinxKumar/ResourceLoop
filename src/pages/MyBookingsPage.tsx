@@ -5,6 +5,7 @@ import { fetchUserBookings, cancelBooking } from '@/hooks/useBookings'
 import { useAuth } from '@/contexts/AuthContext'
 import { BookingCard } from '@/components/bookings/BookingCard'
 import { QrCheckinModal } from '@/components/resources/QrCheckinModal'
+import { IncidentReportModal } from '@/components/bookings/IncidentReportModal'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { EmptyState } from '@/components/common/EmptyState'
 import type { Booking } from '@/types/domain'
@@ -13,6 +14,7 @@ export const MyBookingsPage: React.FC = () => {
   const { user } = useAuth()
   const [filterTab, setFilterTab] = useState<'all' | 'active' | 'pending' | 'returned'>('all')
   const [selectedBookingForPass, setSelectedBookingForPass] = useState<Booking | null>(null)
+  const [selectedBookingForIncident, setSelectedBookingForIncident] = useState<Booking | null>(null)
   const [bookingsList, setBookingsList] = useState<Booking[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -147,6 +149,7 @@ export const MyBookingsPage: React.FC = () => {
               booking={booking}
               onViewPass={(b) => setSelectedBookingForPass(b)}
               onCancel={handleCancel}
+              onReportIncident={(b) => setSelectedBookingForIncident(b)}
             />
           ))}
         </div>
@@ -165,6 +168,17 @@ export const MyBookingsPage: React.FC = () => {
           isOpen={!!selectedBookingForPass}
           onClose={() => setSelectedBookingForPass(null)}
           booking={selectedBookingForPass}
+        />
+      )}
+
+      {/* Incident Report Modal */}
+      {selectedBookingForIncident && (
+        <IncidentReportModal
+          isOpen={!!selectedBookingForIncident}
+          bookingId={selectedBookingForIncident.id}
+          resourceTitle={selectedBookingForIncident.resource?.title}
+          onSubmitted={() => loadBookings()}
+          onClose={() => setSelectedBookingForIncident(null)}
         />
       )}
     </div>

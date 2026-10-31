@@ -1,7 +1,13 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Bell, Search, ShieldCheck, LogOut, User, Building, CheckCircle2 } from 'lucide-react'
+import { Bell, Search, ShieldCheck, LogOut, CheckCircle2, Check, Clock } from 'lucide-react'
 import { useAuth } from '@/contexts/AuthContext'
+import type { Notification } from '@/types/domain'
+import {
+  fetchUserNotifications,
+  markNotificationAsRead,
+  markAllNotificationsAsRead,
+} from '@/services/notifications'
 
 interface HeaderProps {
   onToggleSidebar?: () => void
@@ -10,8 +16,47 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = () => {
   const { user, profile, role, logout } = useAuth()
   const [showNotifications, setShowNotifications] = useState(false)
+  const [notifications, setNotifications] = useState<Notification[]>([])
   const [searchQuery, setSearchQuery] = useState('')
+  const [loadingNotifications, setLoadingNotifications] = useState(false)
   const navigate = useNavigate()
+
+  const loadNotifications = async () => {
+    if (!user) return
+    setLoadingNotifications(true)
+    try {
+      const data = await fetchUserNotifications()
+      setNotifications(data)
+    } finally {
+      setLoadingNotifications(false)
+    }
+  }
+
+  useEffect(() => {
+    loadNotifications()
+  }, [user])
+
+  const unreadCount = notifications.filter((n) => !n.is_read).length
+
+  const handleMarkAsRead = async (id: string) => {
+    try {
+      await markNotificationAsRead(id)
+      setNotifications((prev) =>
+        prev.map((n) => (n.id === id ? { ...n, is_read: true } : n))
+      )
+    } catch (err) {
+      console.error(err)
+    }
+  }
+
+  const handleMarkAllAsRead = async () => {
+    try {
+      await markAllNotificationsAsRead()
+      setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })))
+    } catch (err) {
+      console.error(err)
+    }
+  }
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -23,7 +68,7 @@ export const Header: React.FC<HeaderProps> = () => {
   const roleBadgeStyle = {
     admin: 'bg-navy-900 text-white border-navy-950',
     owner: 'bg-brand-50 text-brand-800 border-brand-200',
-    seeker: 'bg-slate-100 text-slate-800 border-slate-200'
+    seeker: 'bg-slate-100 text-slate-800 border-slate-200',
   }[role] || 'bg-slate-100 text-slate-700'
 
   return (
@@ -54,26 +99,90 @@ export const Header: React.FC<HeaderProps> = () => {
           </span>
         </div>
 
-        {/* Notifications Icon */}
+        {/* Notifications Icon with Badge */}
         <div className="relative">
           <button
-            onClick={() => setShowNotifications(!showNotifications)}
-            className="p-2 rounded-lg text-slate-500 hover:text-navy-900 hover:bg-slate-100 transition-colors focus:outline-none"
+            onClick={() => {
+              setShowNotifications(!showNotifications)
+              if (!showNotifications) loadNotifications()
+            }}
+            className="p-2 rounded-lg text-slate-500 hover:text-navy-900 hover:bg-slate-100 transition-colors focus:outline-none relative"
             aria-label="Notifications"
           >
             <Bell className="w-4 h-4" />
+            {unreadCount > 0 && (
+              <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-brand-600 ring-2 ring-white" />
+            )}
           </button>
 
           {showNotifications && (
-            <div className="absolute right-0 mt-2 w-80 bg-white rounded-xl shadow-xl border border-slate-200 py-3 px-4 z-50">
-              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-                <span className="text-xs font-bold text-navy-950">Activity Alerts</span>
-                <span className="text-[10px] text-slate-400">Database connected</span>
+            <div className="absolute right-0 mt-2 w-80 sm:w-96 bg-white rounded-xl shadow-2xl border border-slate-200 py-3 z-50 animate-in fade-in slide-in-from-top-1 duration-150">
+              <div className="flex items-center justify-between px-4 pb-2.5 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-navy-950">Campus Activity Alerts</span>
+                  {unreadCount > 0 && (
+                    <span className="text-[10px] bg-brand-50 text-brand-700 font-semibold px-1.5 py-0.2 rounded-full border border-brand-200">
+                      {unreadCount} unread
+                    </span>
+                  )}
+                </div>
+                {unreadCount > 0 && (
+                  <button
+                    onClick={handleMarkAllAsRead}
+                    className="text-[11px] text-brand-600 hover:text-brand-800 font-semibold"
+                  >
+                    Mark all read
+                  </button>
+                )}
               </div>
-              <div className="py-6 text-center text-xs text-slate-500 space-y-1">
-                <CheckCircle2 className="w-6 h-6 text-emerald-500 mx-auto mb-1.5" />
-                <p className="font-semibold text-navy-900">All caught up</p>
-                <p className="text-[11px] text-slate-400">No unread notifications on your account.</p>
+
+              <div className="max-h-72 overflow-y-auto divide-y divide-slate-100">
+                {notifications.length === 0 ? (
+                  <div className="py-8 text-center text-xs text-slate-500 space-y-1">
+                    <CheckCircle2 className="w-6 h-6 text-emerald-500 mx-auto mb-1.5" />
+                    <p className="font-semibold text-navy-900">All caught up</p>
+                    <p className="text-[11px] text-slate-400">No notifications on your account.</p>
+                  </div>
+                ) : (
+                  notifications.map((n) => (
+                    <div
+                      key={n.id}
+                      className={`p-3 text-xs transition-colors flex items-start gap-2.5 ${
+                        n.is_read ? 'bg-white opacity-80' : 'bg-brand-50/30'
+                      }`}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-1 mb-0.5">
+                          <p className={`font-semibold text-navy-950 truncate ${!n.is_read ? 'text-brand-900' : ''}`}>
+                            {n.title}
+                          </p>
+                          <span className="text-[10px] text-slate-400 whitespace-nowrap">
+                            {new Date(n.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-600 leading-relaxed">{n.message}</p>
+                        {n.link_url && (
+                          <Link
+                            to={n.link_url}
+                            onClick={() => setShowNotifications(false)}
+                            className="text-[10px] font-semibold text-brand-600 hover:text-brand-800 inline-block mt-1"
+                          >
+                            View details →
+                          </Link>
+                        )}
+                      </div>
+                      {!n.is_read && (
+                        <button
+                          onClick={() => handleMarkAsRead(n.id)}
+                          className="p-1 rounded hover:bg-slate-200 text-slate-400 hover:text-navy-900 transition-colors flex-shrink-0"
+                          title="Mark read"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           )}
