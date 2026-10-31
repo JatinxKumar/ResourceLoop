@@ -9,11 +9,7 @@ import {
   Building,
   AlertCircle,
   RefreshCw,
-  FileText,
   AlertTriangle,
-  Check,
-  XCircle,
-  ExternalLink,
 } from 'lucide-react'
 import { StatCard } from '@/components/dashboard/StatCard'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
@@ -26,7 +22,7 @@ import {
   updateUserRole,
 } from '@/services/admin'
 import { getAuditLogs } from '@/services/audit'
-import { getIncidents, reviewPenalty, updateIncidentStatus } from '@/services/incidents'
+import { getIncidents, reviewPenalty } from '@/services/incidents'
 
 export const AdminDashboardPage: React.FC = () => {
   const [overview, setOverview] = useState<{
@@ -508,17 +504,22 @@ export const AdminDashboardPage: React.FC = () => {
                     <td className="p-3 font-bold text-navy-950">{u.full_name || 'Anonymous User'}</td>
                     <td className="p-3 text-slate-600 font-mono text-[11px]">{u.email}</td>
                     <td className="p-3">
-                      <span
-                        className={`inline-flex px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                      <select
+                        value={u.role}
+                        disabled={actionLoading}
+                        onChange={(e) => handleUserRoleChange(u.id, e.target.value as UserRole)}
+                        className={`text-[10px] font-semibold uppercase px-2 py-1 rounded border border-slate-200 bg-white focus:outline-none focus:ring-1 focus:ring-brand-500 cursor-pointer ${
                           u.role === 'admin'
-                            ? 'bg-navy-900 text-white'
+                            ? 'text-navy-950 font-bold bg-navy-50'
                             : u.role === 'owner'
-                            ? 'bg-brand-50 text-brand-800 border border-brand-200'
-                            : 'bg-slate-100 text-slate-700'
+                            ? 'text-brand-800 bg-brand-50'
+                            : 'text-slate-700'
                         }`}
                       >
-                        {u.role}
-                      </span>
+                        <option value="seeker">SEEKER</option>
+                        <option value="owner">OWNER</option>
+                        <option value="admin">ADMIN</option>
+                      </select>
                     </td>
                     <td className="p-3 text-slate-600">{u.organization?.name || 'Unassigned'}</td>
                     <td className="p-3 text-right font-mono text-[10px] text-slate-400">

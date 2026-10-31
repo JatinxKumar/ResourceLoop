@@ -128,15 +128,16 @@ export interface Profile {
 export interface ResourceAvailabilityInfo {
   days: string[];
   hours: string;
-  condition_status?: string;
-  estimated_value?: number;
-  is_donation?: boolean;
   slot_duration_minutes?: number;
   maintenance_blackouts?: Array<{
     start: string;
     end: string;
     reason: string;
   }>;
+  is_donation?: boolean;
+  condition_status?: ConditionStatus;
+  estimated_value?: number;
+  transfer_terms?: string;
 }
 
 /**

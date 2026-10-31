@@ -11,7 +11,8 @@ import {
   LogOut,
   ExternalLink,
   Lock,
-  Gift
+  Gift,
+  History
 } from 'lucide-react'
 import { useAuth } from '@/contexts/AuthContext'
 
@@ -32,6 +33,7 @@ export const Sidebar: React.FC = () => {
     { name: 'Custodian Pass Scanner', href: '/checkin', icon: ShieldCheck },
     { name: 'Impact & CapEx', href: '/impact', icon: BarChart3 },
     { name: 'Donations', href: '/donations', icon: Gift },
+    { name: 'My History', href: '/history', icon: History },
   ]
 
   return (

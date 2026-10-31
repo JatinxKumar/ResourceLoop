@@ -9,6 +9,7 @@ import { getCurrentProfile } from './profiles';
 
 /**
  * Retrieves notifications for the authenticated user (or specified user).
+ * Canonical retrieval method.
  */
 export async function getUserNotifications(
   userId?: string,
@@ -30,10 +31,17 @@ export async function getUserNotifications(
 
   if (error) {
     console.error('[getUserNotifications] Error fetching notifications:', error.message);
-    throw new Error(`Failed to retrieve notifications: ${error.message}`);
+    return [];
   }
 
   return (data as Notification[]) || [];
+}
+
+/**
+ * Canonical frontend-friendly alias for getUserNotifications.
+ */
+export async function fetchUserNotifications(): Promise<Notification[]> {
+  return getUserNotifications();
 }
 
 /**
@@ -79,7 +87,7 @@ export async function markNotificationAsRead(notificationId: string): Promise<vo
 }
 
 /**
- * Marks all notifications as read for the user.
+ * Marks all notifications as read for current user.
  */
 export async function markAllNotificationsAsRead(userId?: string): Promise<void> {
   let targetUserId = userId;
@@ -102,7 +110,7 @@ export async function markAllNotificationsAsRead(userId?: string): Promise<void>
 }
 
 /**
- * Directly provisions a notification for a user.
+ * Directly provisions an in-app notification for a user.
  */
 export async function createNotification(
   userId: string,

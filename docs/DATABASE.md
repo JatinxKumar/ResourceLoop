@@ -173,9 +173,22 @@ Reservation requests and session bookings.
 * **`status`** (`TEXT`, NOT NULL, default `'pending'`): Allowed: `'pending'`, `'approved'`, `'rejected'`, `'waitlisted'`, `'checked_in'`, `'returned'`, `'cancelled'`, `'overdue'`.
 * **`approved_by`** (`UUID`, `REFERENCES profiles(id) ON DELETE SET NULL`).
 * **`rejection_reason`** (`TEXT`).
+* **`waitlist_position`** (`INTEGER`, default `NULL`): Deterministic FIFO queue position per resource.
 * **`created_at` / `updated_at`** (`TIMESTAMPTZ`, default `now()`).
+* **Exclusion Constraint**: `no_overlapping_scheduled_bookings` (`EXCLUDE USING gist (resource_id WITH =, tstzrange(start_time, end_time, '[)') WITH &&) WHERE (status IN ('approved', 'checked_in'))`) prevents concurrent double-booking at the PostgreSQL engine level.
 
-### 2.5 `condition_reports`
+### 2.5 `booking_access_tokens`
+Opaque, high-entropy QR access tokens for single-use physical check-in and return handshakes.
+* **`id`** (`UUID`, PK, `gen_random_uuid()`).
+* **`booking_id`** (`UUID`, `REFERENCES bookings(id) ON DELETE CASCADE`).
+* **`token_type`** (`TEXT`, NOT NULL): Allowed: `'check_in'`, `'check_out'`.
+* **`token_hash`** (`TEXT`, NOT NULL, UNIQUE): SHA-256 hash of the 256-bit opaque random token.
+* **`expires_at`** (`TIMESTAMPTZ`, NOT NULL).
+* **`used_at`** (`TIMESTAMPTZ`, default `NULL`): Single-use timestamp preventing replay attacks.
+* **`created_at`** (`TIMESTAMPTZ`, default `now()`).
+* **Security**: RLS strictly blocks ordinary user `SELECT` access. Validated exclusively via `SECURITY DEFINER` RPCs.
+
+### 2.6 `condition_reports`
 Inspection audit records taken prior to starting usage and upon returning equipment.
 * **`id`** (`UUID`, PK, `gen_random_uuid()`).
 * **`booking_id`** (`UUID`, `REFERENCES bookings(id) ON DELETE CASCADE`).
@@ -229,16 +242,17 @@ Row Level Security is enabled across all 8 tables.
 | `organizations` | Verified or user's org | Admin only | Admin only | Admin only |
 | `profiles` | Own profile, org peers, owners, admins | Own profile / trigger | Own profile (role immutable) | Admin only |
 | `resources` | Active resources (`status <> 'unavailable'`) or owner/admin | Owner/Admin with matching org | Owner or Admin | Owner or Admin |
-| `bookings` | Requester, Resource Owner, or Admin | Requester (`status = 'pending'`) | Requester (cancel only) OR Owner/Admin (transitions) | Admin only |
+| `bookings` | Requester, Resource Owner, or Admin | **RPC ONLY** (`request_booking`) | **RPC ONLY** (Designated state transitions) | Admin only |
+| `booking_access_tokens` | Admin only | System / RPC | Admin only | Admin only |
 | `condition_reports` | Requester, Owner, Admin | Booking participants | **BLOCKED** (Immutable) | Admin only |
 | `incidents` | Reporter, Owner, Admin | Booking participants | Owner or Admin | Admin only |
 | `notifications` | Recipient only (`user_id = auth.uid()`) | System / Authenticated | Recipient only (`is_read`) | Recipient only |
 | `audit_logs` | Admin only | Authenticated / Triggers | **BLOCKED** (Immutable) | **BLOCKED** (Immutable) |
 
-### Privilege Escalation Prevention
-User role escalation is strictly mitigated at two levels:
-1. **RLS Policy**: Profiles can only be updated where `id = auth.uid()`, and the security definer function checks role changes.
-2. **PostgreSQL Trigger (`trg_profiles_role_guard`)**: A `BEFORE UPDATE OF role` trigger executes on `profiles`. If `NEW.role <> OLD.role` and the caller is not an admin (`NOT public.is_admin()`), the transaction aborts with an exception.
+### Privilege Escalation & RPC-Only State Machine Guarding
+1. **Direct Table Privilege Revocation**: Direct `INSERT`, `UPDATE`, and `DELETE` on `public.bookings` are strictly **REVOKED** from `authenticated` and `anon` roles. All booking creation and state transitions must execute through designated `SECURITY DEFINER` RPCs.
+2. **Search Path Hardening**: All RPCs configure `SET search_path = pg_catalog, extensions, pg_temp`, removing `public` from the search path to eliminate object-hijacking vectors. All application objects are explicitly schema-qualified (`public.*`).
+3. **User Role Escalation**: Profile role changes are blocked unless caller is `is_admin()`.
 
 ---
 
@@ -250,7 +264,9 @@ User role escalation is strictly mitigated at two levels:
    Automatically provisions a new record in `public.profiles` whenever an identity is registered in `auth.users`.
 3. **`trg_profiles_role_guard`**:
    Prevents non-administrators from escalating their role.
-4. **`trg_booking_lifecycle`**:
+4. **`trg_booking_state_machine_guard`**:
+   Guarantees direct client mutations cannot bypass the booking RPC state machine.
+5. **`trg_booking_lifecycle`**:
    - On `INSERT`: Notifies the resource owner of a pending reservation request and writes a `BOOKING_CREATED` audit log entry.
    - On `UPDATE`: When `status` changes, notifies the requester (e.g., `Booking Approved`) and writes a `BOOKING_STATUS_<STATUS>` audit log entry.
 

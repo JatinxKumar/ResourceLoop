@@ -13,11 +13,11 @@ import type {
   ResourceFilters,
 } from '../types/domain';
 import { getCurrentProfile } from './profiles';
-import { requestBooking, approveBooking, rejectBooking, getBookingById } from './bookings';
+import { requestBooking, rejectBooking } from './bookings';
 
 /**
  * Creates a donation / surplus asset listing for permanent transfer.
- * Restricted to verified owners or platform administrators.
+ * Strictly restricted to verified owners or platform administrators.
  */
 export async function createDonationListing(dto: CreateDonationDTO): Promise<Resource> {
   const profile = await getCurrentProfile();
@@ -152,7 +152,18 @@ export async function requestDonation(dto: RequestDonationDTO): Promise<Booking>
     throw new Error('Forbidden: You must be affiliated with an institution to request surplus equipment');
   }
 
-  // Set a standard 14-day transfer window for the donation allocation request
+  // Retrieve resource details to identify donor owner for notification dispatch
+  const { data: resource, error: resError } = await supabase
+    .from('resources')
+    .select('id, title, owner_id')
+    .eq('id', dto.resource_id)
+    .single();
+
+  if (resError || !resource) {
+    throw new Error('Surplus resource not found');
+  }
+
+  // Standard 14-day transfer window for the donation allocation request
   const startTime = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   const endTime = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
 
@@ -167,43 +178,72 @@ export async function requestDonation(dto: RequestDonationDTO): Promise<Booking>
     purpose: formattedPurpose,
   });
 
+  // Notify donor owner
+  if (resource.owner_id) {
+    await supabase.from('notifications').insert({
+      user_id: resource.owner_id,
+      title: 'New Donation Request Received',
+      message: `${profile.full_name || 'A researcher'} submitted a claim request for surplus equipment "${resource.title}".`,
+      link_url: '/donations',
+    });
+  }
+
   return booking;
 }
 
 /**
  * Accepts a donation transfer request.
- * Approves the booking and marks the resource as unavailable to conclude the donation lifecycle.
+ * Executes atomically in a single database transaction via the public.accept_donation RPC:
+ *   1. Authenticates caller & verifies ownership/admin privileges.
+ *   2. Validates booking is currently pending/waitlisted.
+ *   3. Validates donation metadata and [DONATION_CLAIM] purpose marker.
+ *   4. Enforces active custody protection and shared resource advisory locks.
+ *   5. Approves booking, assigns approver, clears waitlist position.
+ *   6. Retires resource lifecycle status to 'unavailable'.
+ *   7. Recalculates waitlist queue for remaining reservations.
+ *   8. Provisions compliance audit trail record.
+ *   9. Dispatches recipient notification.
+ * Failure of any step rolls back the entire database transaction.
+ *
+ * NOTE: If Migration 004 is not yet deployed, throws a clear user-facing requirement
+ * rather than silently performing non-atomic mutations or bypassing authorization checks.
  */
 export async function acceptDonation(bookingId: string): Promise<Booking> {
-  const booking = await getBookingById(bookingId);
-  if (!booking) {
-    throw new Error('Booking not found');
+  if (!bookingId) throw new Error('Booking ID is required');
+
+  const profile = await getCurrentProfile();
+  if (!profile) {
+    throw new Error('Unauthorized: Authentication required to accept donation');
   }
 
-  // Approve through the core engine
-  const approved = await approveBooking(bookingId);
+  if (profile.role !== 'owner' && profile.role !== 'admin') {
+    throw new Error('Forbidden: Only institutional asset owners or administrators can accept a donation request');
+  }
 
-  // Mark the resource as unavailable / completed transfer so it leaves the active catalogue
-  await supabase
-    .from('resources')
-    .update({ status: 'unavailable', updated_at: new Date().toISOString() })
-    .eq('id', booking.resource_id);
-
-  // Insert audit record
-  const profile = await getCurrentProfile();
-  await supabase.from('audit_logs').insert({
-    actor_id: profile?.id || null,
-    action: 'DONATION_TRANSFER_ACCEPTED',
-    entity_type: 'resource',
-    entity_id: booking.resource_id,
-    details: {
-      booking_id: bookingId,
-      recipient_id: booking.requester_id,
-      accepted_at: new Date().toISOString(),
-    },
+  // Primary execution: Atomic single-transaction RPC
+  const { data, error } = await supabase.rpc('accept_donation', {
+    p_booking_id: bookingId,
   });
 
-  return approved;
+  if (!error && data) {
+    return data as Booking;
+  }
+
+  // Explicitly detect if Migration 004 RPC has not yet been deployed to target database
+  if (
+    error &&
+    (error.code === '42883' ||
+      error.message?.includes('accept_donation') ||
+      error.message?.includes('does not exist') ||
+      error.code === 'PGRST202')
+  ) {
+    throw new Error(
+      'Database Migration 004 is required for atomic donation transfers: public.accept_donation RPC is not deployed in Supabase.'
+    );
+  }
+
+  console.error('[acceptDonation] RPC error:', error?.message);
+  throw new Error(error?.message || 'Failed to accept donation');
 }
 
 /**
@@ -211,4 +251,35 @@ export async function acceptDonation(bookingId: string): Promise<Booking> {
  */
 export async function rejectDonation(bookingId: string, reason: string): Promise<Booking> {
   return rejectBooking(bookingId, reason);
+}
+
+/**
+ * Lists incoming claim requests for surplus equipment owned by the user (or all if admin).
+ */
+export async function listDonationClaims(ownerId?: string): Promise<Booking[]> {
+  const profile = await getCurrentProfile();
+  if (!profile) return [];
+
+  let query = supabase
+    .from('bookings')
+    .select(`
+      *,
+      resource:resources!inner(id, title, category, location, owner_id, organization:organizations(name), availability_info),
+      requester:profiles!bookings_requester_id_fkey(id, full_name, email, organization:organizations(name))
+    `)
+    .filter('purpose', 'like', '[DONATION_CLAIM]%')
+    .order('created_at', { ascending: false });
+
+  if (profile.role !== 'admin') {
+    const targetOwner = ownerId || profile.id;
+    query = query.eq('resource.owner_id', targetOwner);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    console.error('[listDonationClaims] Error:', error.message);
+    return [];
+  }
+
+  return (data as Booking[]) || [];
 }

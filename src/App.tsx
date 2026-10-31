@@ -97,6 +97,22 @@ export const App: React.FC = () => {
                 </ProtectedRoute>
               }
             />
+            <Route
+              path="/resources/:id/history"
+              element={
+                <ProtectedRoute allowedRoles={['seeker', 'owner', 'admin']}>
+                  <ResourceHistoryPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/history"
+              element={
+                <ProtectedRoute allowedRoles={['seeker', 'owner', 'admin']}>
+                  <UserHistoryPage />
+                </ProtectedRoute>
+              }
+            />
 
             {/* Owner-Only Console (Owner & Admin) */}
             <Route

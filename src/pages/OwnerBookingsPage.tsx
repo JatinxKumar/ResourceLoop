@@ -15,6 +15,7 @@ import {
   Ban,
 } from 'lucide-react'
 import { fetchOwnerBookings, approveBooking, rejectBooking } from '@/hooks/useBookings'
+import { acceptDonation } from '@/services/donations'
 import { useAuth } from '@/contexts/AuthContext'
 import { StatusBadge } from '@/components/common/StatusBadge'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
@@ -80,8 +81,21 @@ export const OwnerBookingsPage: React.FC = () => {
     setProcessingId(bookingId)
     setActionFeedback(null)
     try {
-      await approveBooking(bookingId)
-      setActionFeedback({ type: 'success', text: 'Booking approved.' })
+      const target = bookings.find((b) => b.id === bookingId)
+      const isDonation =
+        target?.purpose?.includes('[DONATION_CLAIM]') ||
+        target?.resource?.availability_info?.is_donation === true
+
+      if (isDonation) {
+        await acceptDonation(bookingId)
+        setActionFeedback({
+          type: 'success',
+          text: 'Surplus donation transfer accepted atomically! Resource status updated to retired.',
+        })
+      } else {
+        await approveBooking(bookingId)
+        setActionFeedback({ type: 'success', text: 'Booking approved.' })
+      }
       await loadBookings()
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to approve booking.'
@@ -216,6 +230,12 @@ export const OwnerBookingsPage: React.FC = () => {
                     <span className="text-xs text-brand-700 font-medium bg-brand-50 px-2 py-0.5 rounded">
                       {booking.resource?.category || 'Equipment'}
                     </span>
+                    {(booking.purpose?.includes('[DONATION_CLAIM]') ||
+                      booking.resource?.availability_info?.is_donation === true) && (
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 text-[10px] font-bold border border-emerald-200">
+                        Surplus Donation Claim
+                      </span>
+                    )}
                   </div>
                   <h3 className="text-base font-bold text-navy-950 mt-1">
                     <Link
@@ -334,7 +354,12 @@ export const OwnerBookingsPage: React.FC = () => {
                             className="px-3 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-sm transition-colors disabled:opacity-50 flex items-center gap-1"
                           >
                             <Check className="w-3.5 h-3.5" />
-                            {processingId === booking.id ? 'Processing...' : 'Approve'}
+                            {processingId === booking.id
+                              ? 'Processing...'
+                              : (booking.purpose?.includes('[DONATION_CLAIM]') ||
+                                 booking.resource?.availability_info?.is_donation === true)
+                              ? 'Accept Transfer'
+                              : 'Approve'}
                           </button>
                           <button
                             onClick={() => setRejectingId(booking.id)}

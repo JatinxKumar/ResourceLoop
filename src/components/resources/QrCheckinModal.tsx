@@ -55,7 +55,15 @@ export const QrCheckinModal: React.FC<QrCheckinModalProps> = ({
       setToken(result.token)
       setExpiresAt(result.expires_at || null)
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to generate booking pass.'
+      let msg = err instanceof Error ? err.message : 'Failed to generate booking pass.'
+      if (
+        msg.includes('42883') ||
+        msg.includes('does not exist') ||
+        msg.includes('generate_booking_pass')
+      ) {
+        msg =
+          'Database Migration 004 is required for single-use QR passes: public.generate_booking_pass RPC is not deployed in Supabase.'
+      }
       setError(msg)
       setToken(null)
     } finally {

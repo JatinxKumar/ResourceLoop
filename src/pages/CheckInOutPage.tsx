@@ -169,7 +169,16 @@ export const CheckInOutPage: React.FC = () => {
       let displayError = msg
       let kind: 'expired' | 'replay' | 'unauthorized' | 'invalid' | 'general' = 'general'
 
-      if (msg.includes('expired') || msg.includes('Expired')) {
+      if (
+        msg.includes('42883') ||
+        msg.includes('does not exist') ||
+        msg.includes('verify_check_in') ||
+        msg.includes('verify_check_out')
+      ) {
+        kind = 'general'
+        displayError =
+          'Database Migration 004 is required for custody verification: verify_check_in / verify_check_out RPC is not deployed in Supabase.'
+      } else if (msg.includes('expired') || msg.includes('Expired')) {
         kind = 'expired'
         displayError = 'This custody pass token has expired. Ask the seeker to generate a fresh pass from their My Reservations page.'
       } else if (msg.includes('already') || msg.includes('replay') || msg.includes('used')) {

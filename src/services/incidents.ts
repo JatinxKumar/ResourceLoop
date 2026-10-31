@@ -72,9 +72,11 @@ export async function reportIncident(dto: CreateIncidentDTO): Promise<Incident> 
 }
 
 /**
- * Retrieves a list of incidents with optional filtering by status, type, or booking.
+ * Fetch all incidents accessible to the authenticated user.
+ * RLS enforces: reporter = auth.uid() OR is_admin() OR asset owner.
+ * Canonical method utilized across admin console and user booking pages.
  */
-export async function getIncidents(filters: IncidentFilters = {}): Promise<Incident[]> {
+export async function fetchIncidents(filters: IncidentFilters = {}): Promise<Incident[]> {
   let query = supabase
     .from('incidents')
     .select(`
@@ -82,6 +84,10 @@ export async function getIncidents(filters: IncidentFilters = {}): Promise<Incid
       reporter:profiles!incidents_reported_by_fkey(id, full_name, email, avatar_url),
       booking:bookings(
         id,
+        start_time,
+        end_time,
+        purpose,
+        status,
         resource:resources(id, title, location, organization:organizations(name)),
         requester:profiles!bookings_requester_id_fkey(id, full_name, email)
       )
@@ -114,12 +120,17 @@ export async function getIncidents(filters: IncidentFilters = {}): Promise<Incid
   const { data, error } = await query;
 
   if (error) {
-    console.error('[getIncidents] Query error:', error.message);
+    console.error('[fetchIncidents] Query error:', error.message);
     throw new Error(`Failed to fetch incidents: ${error.message}`);
   }
 
   return (data as Incident[]) || [];
 }
+
+/**
+ * Backward-compatible alias for fetchIncidents.
+ */
+export const getIncidents = fetchIncidents;
 
 /**
  * Retrieves detailed information for a single incident.
@@ -155,13 +166,14 @@ export async function getIncidentById(id: string): Promise<Incident | null> {
 }
 
 /**
- * Updates an incident's investigation status and resolution notes.
+ * Resolves an incident (restricted to asset owner or administrator).
+ * Canonical name across frontend and backend layers.
  */
-export async function updateIncidentStatus(
-  id: string,
+export async function resolveIncident(
+  incidentId: string,
   dto: ResolveIncidentDTO
 ): Promise<Incident> {
-  if (!id) throw new Error('Incident ID is required');
+  if (!incidentId) throw new Error('Incident ID is required');
 
   const profile = await getCurrentProfile();
   if (!profile) {
@@ -175,7 +187,7 @@ export async function updateIncidentStatus(
       resolution_notes: dto.resolution_notes.trim(),
       updated_at: new Date().toISOString(),
     })
-    .eq('id', id)
+    .eq('id', incidentId)
     .select(`
       *,
       reporter:profiles!incidents_reported_by_fkey(id, full_name, email, avatar_url)
@@ -183,7 +195,7 @@ export async function updateIncidentStatus(
     .single();
 
   if (error) {
-    console.error(`[updateIncidentStatus] Error updating incident ${id}:`, error.message);
+    console.error(`[resolveIncident] Error updating incident ${incidentId}:`, error.message);
     throw new Error(`Failed to update incident: ${error.message}`);
   }
 
@@ -192,7 +204,7 @@ export async function updateIncidentStatus(
     actor_id: profile.id,
     action: 'INCIDENT_STATUS_UPDATED',
     entity_type: 'incident',
-    entity_id: id,
+    entity_id: incidentId,
     details: {
       new_status: dto.status,
       resolution_notes: dto.resolution_notes,
@@ -201,6 +213,11 @@ export async function updateIncidentStatus(
 
   return data as Incident;
 }
+
+/**
+ * Backward-compatible alias for resolveIncident.
+ */
+export const updateIncidentStatus = resolveIncident;
 
 /**
  * Administrative Human Review of Penalties:
@@ -223,24 +240,10 @@ export async function reviewPenalty(dto: ReviewPenaltyDTO): Promise<Incident> {
     dto.penalty_amount ? ` (Financial assessment: $${dto.penalty_amount})` : ''
   }`;
 
-  const { data, error } = await supabase
-    .from('incidents')
-    .update({
-      status: dto.status,
-      resolution_notes: resolutionSummary,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', dto.incident_id)
-    .select(`
-      *,
-      reporter:profiles!incidents_reported_by_fkey(id, full_name, email)
-    `)
-    .single();
-
-  if (error) {
-    console.error(`[reviewPenalty] Error completing penalty review for ${dto.incident_id}:`, error.message);
-    throw new Error(`Failed to complete penalty review: ${error.message}`);
-  }
+  const resolved = await resolveIncident(dto.incident_id, {
+    status: dto.status,
+    resolution_notes: resolutionSummary,
+  });
 
   // Audit log with full governance details
   await supabase.from('audit_logs').insert({
@@ -267,5 +270,5 @@ export async function reviewPenalty(dto: ReviewPenaltyDTO): Promise<Incident> {
     });
   }
 
-  return data as Incident;
+  return resolved;
 }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import {
   Heart,
   Plus,
@@ -12,31 +12,38 @@ import {
   ArrowRight,
   ShieldCheck,
   Send,
-  X
+  X,
+  Check,
+  Clock,
+  User,
+  Inbox
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '@/contexts/AuthContext'
 import { StatusBadge } from '@/components/common/StatusBadge'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { EmptyState } from '@/components/common/EmptyState'
-import type { Resource, ConditionStatus } from '@/types/domain'
+import type { Resource, ConditionStatus, Booking, Organization } from '@/types/domain'
 import {
   listDonationListings,
   createDonationListing,
   requestDonation,
   acceptDonation,
   rejectDonation,
+  listDonationClaims,
 } from '@/services/donations'
 import { getOrganizations } from '@/services/organizations'
-import type { Organization } from '@/types/domain'
 
 export const DonationsPage: React.FC = () => {
   const { user, profile, role } = useAuth()
   const isOwnerOrAdmin = role === 'owner' || role === 'admin'
 
+  const [activeTab, setActiveTab] = useState<'catalog' | 'claims'>('catalog')
   const [donations, setDonations] = useState<Resource[]>([])
+  const [claims, setClaims] = useState<Booking[]>([])
   const [organizations, setOrganizations] = useState<Organization[]>([])
   const [loading, setLoading] = useState(true)
+  const [claimsLoading, setClaimsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [successMsg, setSuccessMsg] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -59,7 +66,12 @@ export const DonationsPage: React.FC = () => {
   const [intendedUse, setIntendedUse] = useState('')
   const [claiming, setClaiming] = useState(false)
 
-  const loadDonations = async () => {
+  // Claim adjudication state
+  const [processingClaimId, setProcessingClaimId] = useState<string | null>(null)
+  const [rejectingClaimId, setRejectingClaimId] = useState<string | null>(null)
+  const [rejectionReason, setRejectionReason] = useState('')
+
+  const loadDonations = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
@@ -75,11 +87,27 @@ export const DonationsPage: React.FC = () => {
     } finally {
       setLoading(false)
     }
-  }
+  }, [search])
+
+  const loadClaims = useCallback(async () => {
+    if (!user) return
+    setClaimsLoading(true)
+    try {
+      const claimsList = await listDonationClaims(user.id)
+      setClaims(claimsList)
+    } catch (err: unknown) {
+      console.warn('Failed to load donation claims:', err)
+    } finally {
+      setClaimsLoading(false)
+    }
+  }, [user])
 
   useEffect(() => {
     loadDonations()
-  }, [])
+    if (isOwnerOrAdmin) {
+      loadClaims()
+    }
+  }, [loadDonations, loadClaims, isOwnerOrAdmin])
 
   const handleCreateDonation = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -142,6 +170,47 @@ export const DonationsPage: React.FC = () => {
     }
   }
 
+  const handleAcceptClaim = async (claimId: string) => {
+    setProcessingClaimId(claimId)
+    setError(null)
+    try {
+      await acceptDonation(claimId)
+      setSuccessMsg('Surplus donation transfer accepted atomically! The asset has been retired from the catalog.')
+      await Promise.all([loadDonations(), loadClaims()])
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to accept donation claim.'
+      setError(msg)
+    } finally {
+      setProcessingClaimId(null)
+    }
+  }
+
+  const handleRejectClaim = async (claimId: string) => {
+    if (!rejectionReason.trim()) {
+      setError('Please provide a reason for declining the transfer request.')
+      return
+    }
+
+    setProcessingClaimId(claimId)
+    setError(null)
+    try {
+      await rejectDonation(claimId, rejectionReason.trim())
+      setSuccessMsg('Donation claim request declined.')
+      setRejectingClaimId(null)
+      setRejectionReason('')
+      await loadClaims()
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to decline donation claim.'
+      setError(msg)
+    } finally {
+      setProcessingClaimId(null)
+    }
+  }
+
+  const pendingClaimsCount = claims.filter(
+    (c) => c.status === 'pending' || c.status === 'waitlisted'
+  ).length
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -161,7 +230,7 @@ export const DonationsPage: React.FC = () => {
 
         <div className="flex items-center gap-2 self-start sm:self-auto">
           <button
-            onClick={loadDonations}
+            onClick={() => { loadDonations(); if (isOwnerOrAdmin) loadClaims(); }}
             className="p-2 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-500 transition-colors"
             title="Refresh Listings"
           >
@@ -180,7 +249,7 @@ export const DonationsPage: React.FC = () => {
       </div>
 
       {error && (
-        <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-center justify-between">
+        <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0" />
             <p>{error}</p>
@@ -203,94 +272,237 @@ export const DonationsPage: React.FC = () => {
         </div>
       )}
 
-      {/* Search Bar */}
-      <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm flex items-center gap-3">
-        <Search className="w-4 h-4 text-slate-400" />
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && loadDonations()}
-          placeholder="Search surplus donations by title, category, or lab location..."
-          className="w-full text-xs bg-transparent focus:outline-none text-navy-900 placeholder:text-slate-400"
-        />
-        <button
-          onClick={loadDonations}
-          className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold transition-colors"
-        >
-          Search
-        </button>
-      </div>
-
-      {/* Listings Grid */}
-      {loading ? (
-        <LoadingSpinner label="Fetching available surplus donation listings from Supabase..." />
-      ) : donations.length > 0 ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {donations.map((item) => (
-            <div
-              key={item.id}
-              className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-card hover:shadow-card-hover transition-all flex flex-col justify-between"
-            >
-              <div>
-                <div className="relative h-44 bg-slate-100">
-                  <img
-                    src={item.image_url || 'https://images.unsplash.com/photo-1582719508461-905c673771fd?auto=format&fit=crop&w=800&q=80'}
-                    alt={item.title}
-                    className="w-full h-full object-cover"
-                  />
-                  <div className="absolute top-3 left-3 flex gap-2">
-                    <span className="px-2.5 py-0.5 rounded-full bg-white/95 backdrop-blur-md text-[10px] font-bold text-navy-900 shadow-sm flex items-center gap-1">
-                      <Tag className="w-3 h-3 text-slate-500" />
-                      <span>{item.category}</span>
-                    </span>
-                    <span className="px-2.5 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-bold shadow-sm">
-                      Surplus Transfer
-                    </span>
-                  </div>
-                </div>
-
-                <div className="p-5 space-y-3">
-                  <div className="flex items-center gap-2 text-xs text-slate-500">
-                    <Building className="w-3.5 h-3.5 text-slate-400" />
-                    <span>{item.organization?.name || 'Partner University'}</span>
-                  </div>
-
-                  <h3 className="text-base font-bold text-navy-950 line-clamp-1">{item.title}</h3>
-                  <p className="text-xs text-slate-600 line-clamp-2 leading-relaxed">{item.description}</p>
-
-                  <div className="pt-2 border-t border-slate-100 grid grid-cols-2 gap-2 text-[11px] text-slate-500">
-                    <div>
-                      <span className="block font-semibold text-slate-700">Condition</span>
-                      <span className="capitalize">{item.availability_info?.condition_status || 'Good'}</span>
-                    </div>
-                    <div>
-                      <span className="block font-semibold text-slate-700">Estimated Value</span>
-                      <span>${Number(item.availability_info?.estimated_value || 0).toLocaleString()} USD</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="p-5 pt-0">
-                <button
-                  onClick={() => setSelectedDonation(item)}
-                  className="w-full py-2 px-3 bg-brand-50 hover:bg-brand-100 text-brand-800 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <Gift className="w-3.5 h-3.5" />
-                  <span>Request Surplus Transfer</span>
-                </button>
-              </div>
-            </div>
-          ))}
+      {/* Tabs */}
+      {isOwnerOrAdmin && (
+        <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
+          <button
+            onClick={() => setActiveTab('catalog')}
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+              activeTab === 'catalog'
+                ? 'bg-navy-900 text-white shadow-xs'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            Surplus Catalog ({donations.length})
+          </button>
+          <button
+            onClick={() => setActiveTab('claims')}
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 ${
+              activeTab === 'claims'
+                ? 'bg-navy-900 text-white shadow-xs'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            <Inbox className="w-3.5 h-3.5" />
+            <span>Incoming Transfer Claims</span>
+            {pendingClaimsCount > 0 && (
+              <span className="px-1.5 py-0.2 bg-brand-500 text-white text-[10px] rounded-full">
+                {pendingClaimsCount}
+              </span>
+            )}
+          </button>
         </div>
+      )}
+
+      {activeTab === 'catalog' ? (
+        <>
+          {/* Search Bar */}
+          <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm flex items-center gap-3">
+            <Search className="w-4 h-4 text-slate-400" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && loadDonations()}
+              placeholder="Search surplus donations by title, category, or lab location..."
+              className="w-full text-xs bg-transparent focus:outline-none text-navy-900 placeholder:text-slate-400"
+            />
+            <button
+              onClick={loadDonations}
+              className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold transition-colors"
+            >
+              Search
+            </button>
+          </div>
+
+          {/* Listings Grid */}
+          {loading ? (
+            <LoadingSpinner label="Fetching available surplus donation listings from Supabase..." />
+          ) : donations.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {donations.map((item) => (
+                <div
+                  key={item.id}
+                  className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-card hover:shadow-card-hover transition-all flex flex-col justify-between"
+                >
+                  <div>
+                    <div className="relative h-44 bg-slate-100">
+                      <img
+                        src={item.image_url || 'https://images.unsplash.com/photo-1582719508461-905c673771fd?auto=format&fit=crop&w=800&q=80'}
+                        alt={item.title}
+                        className="w-full h-full object-cover"
+                      />
+                      <div className="absolute top-3 left-3 flex gap-2">
+                        <span className="px-2.5 py-0.5 rounded-full bg-white/95 backdrop-blur-md text-[10px] font-bold text-navy-900 shadow-sm flex items-center gap-1">
+                          <Tag className="w-3 h-3 text-slate-500" />
+                          <span>{item.category}</span>
+                        </span>
+                        <span className="px-2.5 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-bold shadow-sm">
+                          Surplus Transfer
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="p-5 space-y-3">
+                      <div className="flex items-center gap-2 text-xs text-slate-500">
+                        <Building className="w-3.5 h-3.5 text-slate-400" />
+                        <span>{item.organization?.name || 'Partner University'}</span>
+                      </div>
+
+                      <h3 className="text-base font-bold text-navy-950 line-clamp-1">{item.title}</h3>
+                      <p className="text-xs text-slate-600 line-clamp-2 leading-relaxed">{item.description}</p>
+
+                      <div className="pt-2 border-t border-slate-100 grid grid-cols-2 gap-2 text-[11px] text-slate-500">
+                        <div>
+                          <span className="block font-semibold text-slate-700">Condition</span>
+                          <span className="capitalize">{item.availability_info?.condition_status || 'Good'}</span>
+                        </div>
+                        <div>
+                          <span className="block font-semibold text-slate-700">Estimated Value</span>
+                          <span>${Number(item.availability_info?.estimated_value || 0).toLocaleString()} USD</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-5 pt-0">
+                    <button
+                      onClick={() => setSelectedDonation(item)}
+                      className="w-full py-2 px-3 bg-brand-50 hover:bg-brand-100 text-brand-800 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5"
+                    >
+                      <Gift className="w-3.5 h-3.5" />
+                      <span>Request Surplus Transfer</span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState
+              title="No surplus equipment currently listed"
+              description="There are currently no surplus assets matching your search criteria. Check back soon or list surplus from your lab."
+              actionLabel="Clear Search"
+              onAction={() => { setSearch(''); loadDonations(); }}
+            />
+          )}
+        </>
       ) : (
-        <EmptyState
-          title="No surplus equipment currently listed"
-          description="There are currently no surplus assets matching your search criteria. Check back soon or list surplus from your lab."
-          actionLabel="Clear Search"
-          onAction={() => { setSearch(''); loadDonations(); }}
-        />
+        /* Incoming Claims Management View (Owner/Admin) */
+        <div className="space-y-4">
+          {claimsLoading ? (
+            <LoadingSpinner label="Loading surplus equipment claims..." />
+          ) : claims.length > 0 ? (
+            claims.map((claim) => (
+              <div
+                key={claim.id}
+                className="bg-white rounded-xl border border-slate-200 p-5 shadow-card hover:shadow-card-hover transition-all space-y-3"
+              >
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-slate-100">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-xs font-semibold text-slate-500">
+                        #{claim.id.substring(0, 8)}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full bg-brand-50 text-brand-800 text-[10px] font-bold border border-brand-200">
+                        Transfer Request
+                      </span>
+                    </div>
+                    <h3 className="text-sm font-bold text-navy-950 mt-1">
+                      {claim.resource?.title || 'Surplus Asset'}
+                    </h3>
+                  </div>
+                  <StatusBadge status={claim.status} />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-600">
+                  <div className="flex items-center gap-2">
+                    <User className="w-3.5 h-3.5 text-slate-400" />
+                    <span><strong>Recipient:</strong> {claim.requester?.full_name || 'Academic Researcher'}</span>
+                  </div>
+                  {claim.requester?.organization && (
+                    <div className="flex items-center gap-2">
+                      <Building className="w-3.5 h-3.5 text-slate-400" />
+                      <span>{claim.requester.organization.name}</span>
+                    </div>
+                  )}
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Submitted {new Date(claim.created_at).toLocaleDateString()}</span>
+                  </div>
+                </div>
+
+                <p className="text-xs text-slate-500 bg-slate-50 p-2.5 rounded-lg border border-slate-100 leading-relaxed">
+                  <strong className="text-slate-700">Research Purpose:</strong> {claim.purpose}
+                </p>
+
+                {(claim.status === 'pending' || claim.status === 'waitlisted') && (
+                  <div className="flex items-center gap-2 pt-2 border-t border-slate-100 flex-wrap">
+                    {rejectingClaimId === claim.id ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={rejectionReason}
+                          onChange={(e) => setRejectionReason(e.target.value)}
+                          placeholder="Reason for declining..."
+                          className="px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg bg-slate-50 focus:outline-none focus:ring-2 focus:ring-rose-400 w-48"
+                        />
+                        <button
+                          onClick={() => handleRejectClaim(claim.id)}
+                          disabled={processingClaimId === claim.id}
+                          className="px-3 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-lg shadow-sm transition-colors disabled:opacity-50 flex items-center gap-1"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                          Decline
+                        </button>
+                        <button
+                          onClick={() => { setRejectingClaimId(null); setRejectionReason('') }}
+                          className="px-2 py-1.5 text-xs text-slate-500 hover:text-slate-700"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => handleAcceptClaim(claim.id)}
+                          disabled={processingClaimId === claim.id}
+                          className="px-3.5 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-sm transition-colors disabled:opacity-50 flex items-center gap-1"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          {processingClaimId === claim.id ? 'Transferring...' : 'Accept Transfer (Atomic RPC)'}
+                        </button>
+                        <button
+                          onClick={() => setRejectingClaimId(claim.id)}
+                          disabled={processingClaimId === claim.id}
+                          className="px-3 py-1.5 text-xs font-medium text-rose-700 border border-rose-200 rounded-lg hover:bg-rose-50 transition-colors disabled:opacity-50 flex items-center gap-1"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                          Decline
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))
+          ) : (
+            <EmptyState
+              icon={Inbox}
+              title="No incoming surplus claims"
+              description="There are currently no pending transfer requests for your surplus equipment listings."
+            />
+          )}
+        </div>
       )}
 
       {/* Modal: Create Donation Listing */}
@@ -349,36 +561,36 @@ export const DonationsPage: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Estimated Value ($ USD)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={estimatedValue}
-                    onChange={(e) => setEstimatedValue(Number(e.target.value))}
-                    className="w-full text-xs p-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Pickup Location</label>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Location / Lab</label>
                   <input
                     type="text"
                     required
                     value={location}
                     onChange={(e) => setLocation(e.target.value)}
-                    placeholder="e.g. Science Quad B14"
+                    placeholder="e.g. Science Complex Room 402"
+                    className="w-full text-xs p-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Estimated Value ($ USD)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={estimatedValue}
+                    onChange={(e) => setEstimatedValue(Number(e.target.value))}
                     className="w-full text-xs p-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Description &amp; Specifications</label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Detailed Description</label>
                 <textarea
-                  rows={3}
+                  rows={2}
                   required
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
-                  placeholder="Details regarding operating condition, accessories included, and maintenance history..."
+                  placeholder="Specify model, service history, included attachments, calibration status..."
                   className="w-full text-xs p-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
                 />
               </div>
@@ -389,7 +601,7 @@ export const DonationsPage: React.FC = () => {
                   type="text"
                   value={transferTerms}
                   onChange={(e) => setTransferTerms(e.target.value)}
-                  placeholder="e.g. Recipient institution covers de-installation and transport"
+                  placeholder="e.g. As-is academic transfer, recipient arranges freight"
                   className="w-full text-xs p-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
                 />
               </div>
@@ -400,7 +612,7 @@ export const DonationsPage: React.FC = () => {
                   type="url"
                   value={imageUrl}
                   onChange={(e) => setImageUrl(e.target.value)}
-                  placeholder="https://..."
+                  placeholder="https://images.unsplash.com/..."
                   className="w-full text-xs p-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
                 />
               </div>
@@ -495,4 +707,3 @@ export const DonationsPage: React.FC = () => {
     </div>
   )
 }
-

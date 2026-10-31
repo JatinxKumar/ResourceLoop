@@ -12,7 +12,8 @@ import {
   Building,
   FileText,
   AlertCircle,
-  Tag
+  Tag,
+  History
 } from 'lucide-react'
 import { getResourceById } from '@/hooks/useResources'
 import { requestBooking } from '@/hooks/useBookings'
@@ -223,10 +224,19 @@ export const ResourceDetailPage: React.FC = () => {
 
           {/* Operational & Eligibility Specifications */}
           <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4">
-            <h2 className="text-base font-bold text-navy-950 flex items-center gap-2">
-              <FileText className="w-4 h-4 text-brand-600" />
-              <span>Operational & Eligibility Specifications</span>
-            </h2>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <h2 className="text-base font-bold text-navy-950 flex items-center gap-2">
+                <FileText className="w-4 h-4 text-brand-600" />
+                <span>Operational & Eligibility Specifications</span>
+              </h2>
+              <Link
+                to={`/resources/${resource.id}/history`}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold transition-colors"
+              >
+                <History className="w-3.5 h-3.5 text-brand-600" />
+                <span>Audit & Usage History</span>
+              </Link>
+            </div>
 
             <div className="border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-100 text-xs">
               <div className="grid grid-cols-3 p-3 bg-white">

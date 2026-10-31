@@ -28,7 +28,7 @@ export async function getAuditLogs(filters: AuditLogFilters = {}): Promise<Audit
     .from('audit_logs')
     .select(`
       *,
-      actor:profiles(id, full_name, email, avatar_url)
+      actor:profiles!audit_logs_actor_id_fkey(id, full_name, email, avatar_url, role)
     `);
 
   if (filters.entity_type) {
