@@ -173,9 +173,22 @@ Reservation requests and session bookings.
 * **`status`** (`TEXT`, NOT NULL, default `'pending'`): Allowed: `'pending'`, `'approved'`, `'rejected'`, `'waitlisted'`, `'checked_in'`, `'returned'`, `'cancelled'`, `'overdue'`.
 * **`approved_by`** (`UUID`, `REFERENCES profiles(id) ON DELETE SET NULL`).
 * **`rejection_reason`** (`TEXT`).
+* **`waitlist_position`** (`INTEGER`, default `NULL`): Deterministic FIFO queue position per resource.
 * **`created_at` / `updated_at`** (`TIMESTAMPTZ`, default `now()`).
+* **Exclusion Constraint**: `no_overlapping_scheduled_bookings` (`EXCLUDE USING gist (resource_id WITH =, tstzrange(start_time, end_time, '[)') WITH &&) WHERE (status IN ('approved', 'checked_in'))`) prevents concurrent double-booking at the PostgreSQL engine level.
 
-### 2.5 `condition_reports`
+### 2.5 `booking_access_tokens`
+Opaque, high-entropy QR access tokens for single-use physical check-in and return handshakes.
+* **`id`** (`UUID`, PK, `gen_random_uuid()`).
+* **`booking_id`** (`UUID`, `REFERENCES bookings(id) ON DELETE CASCADE`).
+* **`token_type`** (`TEXT`, NOT NULL): Allowed: `'check_in'`, `'check_out'`.
+* **`token_hash`** (`TEXT`, NOT NULL, UNIQUE): SHA-256 hash of the 256-bit opaque random token.
+* **`expires_at`** (`TIMESTAMPTZ`, NOT NULL).
+* **`used_at`** (`TIMESTAMPTZ`, default `NULL`): Single-use timestamp preventing replay attacks.
+* **`created_at`** (`TIMESTAMPTZ`, default `now()`).
+* **Security**: RLS strictly blocks ordinary user `SELECT` access. Validated exclusively via `SECURITY DEFINER` RPCs.
+
+### 2.6 `condition_reports`
 Inspection audit records taken prior to starting usage and upon returning equipment.
 * **`id`** (`UUID`, PK, `gen_random_uuid()`).
 * **`booking_id`** (`UUID`, `REFERENCES bookings(id) ON DELETE CASCADE`).
