@@ -10,7 +10,8 @@ import {
   BarChart3,
   LogOut,
   ExternalLink,
-  Lock
+  Lock,
+  Gift
 } from 'lucide-react'
 import { useAuth } from '@/contexts/AuthContext'
 
@@ -30,6 +31,7 @@ export const Sidebar: React.FC = () => {
     { name: 'My Bookings', href: '/bookings', icon: CalendarCheck },
     { name: 'Custodian Pass Scanner', href: '/checkin', icon: ShieldCheck },
     { name: 'Impact & CapEx', href: '/impact', icon: BarChart3 },
+    { name: 'Donations', href: '/donations', icon: Gift },
   ]
 
   return (

@@ -21,6 +21,9 @@ import { OwnerBookingsPage } from '@/pages/OwnerBookingsPage'
 import { CheckInOutPage } from '@/pages/CheckInOutPage'
 import { AdminDashboardPage } from '@/pages/AdminDashboardPage'
 import { ImpactDashboardPage } from '@/pages/ImpactDashboardPage'
+import { DonationsPage } from '@/pages/DonationsPage'
+import { ResourceHistoryPage } from '@/pages/ResourceHistoryPage'
+import { UserHistoryPage } from '@/pages/UserHistoryPage'
 
 export const App: React.FC = () => {
   return (
@@ -83,6 +86,14 @@ export const App: React.FC = () => {
               element={
                 <ProtectedRoute allowedRoles={['seeker', 'owner', 'admin']}>
                   <ImpactDashboardPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/donations"
+              element={
+                <ProtectedRoute allowedRoles={['seeker', 'owner', 'admin']}>
+                  <DonationsPage />
                 </ProtectedRoute>
               }
             />

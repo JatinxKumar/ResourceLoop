@@ -128,6 +128,9 @@ export interface Profile {
 export interface ResourceAvailabilityInfo {
   days: string[];
   hours: string;
+  condition_status?: string;
+  estimated_value?: number;
+  is_donation?: boolean;
   slot_duration_minutes?: number;
   maintenance_blackouts?: Array<{
     start: string;
@@ -371,5 +374,97 @@ export interface BookingFilters {
   requester_id?: string;
   limit?: number;
   offset?: number;
+}
+
+// ==============================================================================
+// 4. DONATION & SURPLUS EQUIPMENT TYPES
+// ==============================================================================
+
+export interface CreateDonationDTO {
+  organization_id: string;
+  title: string;
+  description: string;
+  category: string;
+  location: string;
+  image_url?: string;
+  condition_status: ConditionStatus;
+  estimated_value?: number;
+  transfer_terms?: string;
+}
+
+export interface RequestDonationDTO {
+  resource_id: string;
+  purpose: string;
+  intended_use?: string;
+}
+
+// ==============================================================================
+// 5. INCIDENT & PENALTY HUMAN REVIEW TYPES
+// ==============================================================================
+
+export type PenaltyAction = 
+  | 'waived' 
+  | 'warning' 
+  | 'penalty_applied' 
+  | 'restitution_required' 
+  | 'privilege_suspended';
+
+export interface IncidentFilters {
+  status?: IncidentStatus | 'all';
+  incident_type?: IncidentType | 'all';
+  booking_id?: string;
+  reported_by?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ReviewPenaltyDTO {
+  incident_id: string;
+  action: PenaltyAction;
+  status: IncidentStatus;
+  resolution_notes: string;
+  penalty_amount?: number;
+}
+
+// ==============================================================================
+// 6. AUDIT & IMPACT ANALYTICS TYPES
+// ==============================================================================
+
+export interface AuditLogFilters {
+  entity_type?: string;
+  entity_id?: string;
+  actor_id?: string;
+  action?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ImpactMetrics {
+  total_completed_bookings: number;
+  total_booking_hours: number;
+  total_active_resources: number;
+  total_participating_orgs: number;
+  estimated_capex_avoidance_usd: number;
+  estimated_co2_avoidance_kg: number;
+  generated_at: string;
+}
+
+export interface ResourceHistory {
+  resource: Resource;
+  total_bookings: number;
+  completed_bookings: number;
+  incidents_count: number;
+  bookings: Booking[];
+  condition_reports: ConditionReport[];
+  incidents: Incident[];
+}
+
+export interface UserHistory {
+  profile: Profile;
+  total_reservations: number;
+  completed_reservations: number;
+  incidents_logged: number;
+  bookings: Booking[];
+  notifications: Notification[];
 }
 

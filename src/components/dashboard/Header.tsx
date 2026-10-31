@@ -4,7 +4,8 @@ import { Bell, Search, ShieldCheck, LogOut, CheckCircle2, Check, Clock } from 'l
 import { useAuth } from '@/contexts/AuthContext'
 import type { Notification } from '@/types/domain'
 import {
-  fetchUserNotifications,
+  getUserNotifications,
+  getUnreadNotificationCount,
   markNotificationAsRead,
   markAllNotificationsAsRead,
 } from '@/services/notifications'
@@ -21,12 +22,18 @@ export const Header: React.FC<HeaderProps> = () => {
   const [loadingNotifications, setLoadingNotifications] = useState(false)
   const navigate = useNavigate()
 
+  const [unreadCount, setUnreadCount] = useState(0)
+
   const loadNotifications = async () => {
     if (!user) return
     setLoadingNotifications(true)
     try {
-      const data = await fetchUserNotifications()
+      const [data, count] = await Promise.all([
+        getUserNotifications(user.id),
+        getUnreadNotificationCount(user.id),
+      ])
       setNotifications(data)
+      setUnreadCount(count)
     } finally {
       setLoadingNotifications(false)
     }
@@ -36,14 +43,13 @@ export const Header: React.FC<HeaderProps> = () => {
     loadNotifications()
   }, [user])
 
-  const unreadCount = notifications.filter((n) => !n.is_read).length
-
   const handleMarkAsRead = async (id: string) => {
     try {
       await markNotificationAsRead(id)
       setNotifications((prev) =>
         prev.map((n) => (n.id === id ? { ...n, is_read: true } : n))
       )
+      setUnreadCount((prev) => Math.max(0, prev - 1))
     } catch (err) {
       console.error(err)
     }
@@ -51,8 +57,9 @@ export const Header: React.FC<HeaderProps> = () => {
 
   const handleMarkAllAsRead = async () => {
     try {
-      await markAllNotificationsAsRead()
+      await markAllNotificationsAsRead(user?.id)
       setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })))
+      setUnreadCount(0)
     } catch (err) {
       console.error(err)
     }

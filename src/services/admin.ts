@@ -1,98 +1,188 @@
-import { supabase } from '@/lib/supabase'
-import type { Organization, Profile, Resource, Booking, AuditLog } from '@/types/domain'
+/**
+ * ResourceLoop - Campus Governance & Platform Administration Service
+ * Provides organizational compliance, user role governance, penalty human review,
+ * and central telemetry oversight for platform administrators.
+ */
 
-export interface PlatformTelemetry {
-  totalResources: number
-  totalUsers: number
-  totalBookings: number
-  totalIncidents: number
-  totalAuditLogs: number
-  organizations: Organization[]
-}
+import { supabase } from '../lib/supabase';
+import type {
+  Organization,
+  Profile,
+  UserRole,
+  OrganizationVerificationStatus,
+} from '../types/domain';
+import { getCurrentProfile } from './profiles';
 
 /**
- * Retrieves aggregate platform telemetry for the administrative console.
+ * Lists all registered institutions and research labs with their verification status.
  */
-export async function getAdminPlatformTelemetry(): Promise<PlatformTelemetry> {
-  const [orgsRes, resCountRes, usersCountRes, bookingsCountRes, incidentsCountRes, auditCountRes] =
-    await Promise.all([
-      supabase.from('organizations').select('*').order('name'),
-      supabase.from('resources').select('*', { count: 'exact', head: true }),
-      supabase.from('profiles').select('*', { count: 'exact', head: true }),
-      supabase.from('bookings').select('*', { count: 'exact', head: true }),
-      supabase.from('incidents').select('*', { count: 'exact', head: true }),
-      supabase.from('audit_logs').select('*', { count: 'exact', head: true }),
-    ])
+export async function listAllOrganizations(status?: OrganizationVerificationStatus): Promise<Organization[]> {
+  let query = supabase
+    .from('organizations')
+    .select('*')
+    .order('name', { ascending: true });
 
-  return {
-    organizations: (orgsRes.data as Organization[]) || [],
-    totalResources: resCountRes.count || 0,
-    totalUsers: usersCountRes.count || 0,
-    totalBookings: bookingsCountRes.count || 0,
-    totalIncidents: incidentsCountRes.count || 0,
-    totalAuditLogs: auditCountRes.count || 0,
+  if (status) {
+    query = query.eq('verification_status', status);
   }
-}
 
-/**
- * Fetch recent immutable audit logs for administrative compliance review.
- */
-export async function fetchAdminAuditLogs(limit: number = 25): Promise<AuditLog[]> {
-  const { data, error } = await supabase
-    .from('audit_logs')
-    .select(`
-      *,
-      actor:profiles!audit_logs_actor_id_fkey(id, full_name, email, role)
-    `)
-    .order('created_at', { ascending: false })
-    .limit(limit)
+  const { data, error } = await query;
 
   if (error) {
-    console.error('[fetchAdminAuditLogs] Error:', error.message)
-    return []
+    console.error('[listAllOrganizations] Error:', error.message);
+    throw new Error(`Failed to list organizations: ${error.message}`);
   }
 
-  return (data as AuditLog[]) || []
+  return (data as Organization[]) || [];
 }
 
 /**
- * Fetch all platform users/profiles for governance oversight.
+ * Verifies or rejects an institution's enrollment application.
+ * Restricted to platform administrators.
  */
-export async function fetchAdminUsers(): Promise<Profile[]> {
+export async function verifyOrganization(
+  organizationId: string,
+  status: 'verified' | 'rejected'
+): Promise<Organization> {
+  const admin = await getCurrentProfile();
+  if (!admin || admin.role !== 'admin') {
+    throw new Error('Forbidden: Only platform administrators can verify organizations');
+  }
+
   const { data, error } = await supabase
+    .from('organizations')
+    .update({
+      verification_status: status,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', organizationId)
+    .select('*')
+    .single();
+
+  if (error) {
+    console.error(`[verifyOrganization] Failed to update ${organizationId}:`, error.message);
+    throw new Error(`Failed to update organization status: ${error.message}`);
+  }
+
+  // Audit trail
+  await supabase.from('audit_logs').insert({
+    actor_id: admin.id,
+    action: `ORGANIZATION_${status.toUpperCase()}`,
+    entity_type: 'organization',
+    entity_id: organizationId,
+    details: {
+      status,
+      verified_by: admin.id,
+    },
+  });
+
+  return data as Organization;
+}
+
+/**
+ * Lists all registered user profiles with institutional affiliations for administrative review.
+ */
+export async function listAllUsers(role?: UserRole): Promise<Profile[]> {
+  let query = supabase
     .from('profiles')
     .select(`
       *,
       organization:organizations(*)
     `)
-    .order('created_at', { ascending: false })
+    .order('created_at', { ascending: false });
 
-  if (error) {
-    console.error('[fetchAdminUsers] Error:', error.message)
-    throw new Error(error.message)
+  if (role) {
+    query = query.eq('role', role);
   }
 
-  return (data as Profile[]) || []
+  const { data, error } = await query;
+
+  if (error) {
+    console.error('[listAllUsers] Error fetching user directory:', error.message);
+    throw new Error(`Failed to retrieve users: ${error.message}`);
+  }
+
+  return (data as Profile[]) || [];
 }
 
 /**
- * Update an organization verification status (Admin action).
+ * Updates a user's platform access role ('seeker', 'owner', 'admin').
+ * Strictly restricted to platform administrators.
+ * Protected by database trigger `prevent_profile_role_escalation`.
  */
-export async function updateOrganizationVerification(
-  orgId: string,
-  status: 'verified' | 'rejected' | 'pending'
-): Promise<Organization> {
-  const { data, error } = await supabase
-    .from('organizations')
-    .update({ verification_status: status, updated_at: new Date().toISOString() })
-    .eq('id', orgId)
-    .select()
-    .single()
-
-  if (error) {
-    console.error('[updateOrganizationVerification] Error:', error.message)
-    throw new Error(error.message)
+export async function updateUserRole(userId: string, newRole: UserRole): Promise<Profile> {
+  const admin = await getCurrentProfile();
+  if (!admin || admin.role !== 'admin') {
+    throw new Error('Forbidden: Only platform administrators can modify user access roles');
   }
 
-  return data as Organization
+  const { data, error } = await supabase
+    .from('profiles')
+    .update({
+      role: newRole,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', userId)
+    .select(`
+      *,
+      organization:organizations(*)
+    `)
+    .single();
+
+  if (error) {
+    console.error(`[updateUserRole] Failed to assign role ${newRole} to ${userId}:`, error.message);
+    throw new Error(`Failed to update user role: ${error.message}`);
+  }
+
+  // Audit trail
+  await supabase.from('audit_logs').insert({
+    actor_id: admin.id,
+    action: 'USER_ROLE_ASSIGNED',
+    entity_type: 'profile',
+    entity_id: userId,
+    details: {
+      assigned_role: newRole,
+      assigned_by: admin.id,
+    },
+  });
+
+  return data as Profile;
+}
+
+/**
+ * Platform Governance Overview:
+ * Returns central platform telemetry and entity counts directly from live Supabase tables.
+ */
+export async function getPlatformOverview(): Promise<{
+  totalOrganizations: number;
+  verifiedOrganizations: number;
+  totalUsers: number;
+  totalResources: number;
+  totalBookings: number;
+  openIncidents: number;
+}> {
+  const [
+    orgsTotal,
+    orgsVerified,
+    usersCount,
+    resourcesCount,
+    bookingsCount,
+    incidentsCount,
+  ] = await Promise.all([
+    supabase.from('organizations').select('*', { count: 'exact', head: true }),
+    supabase.from('organizations').select('*', { count: 'exact', head: true }).eq('verification_status', 'verified'),
+    supabase.from('profiles').select('*', { count: 'exact', head: true }),
+    supabase.from('resources').select('*', { count: 'exact', head: true }),
+    supabase.from('bookings').select('*', { count: 'exact', head: true }),
+    supabase.from('incidents').select('*', { count: 'exact', head: true }).eq('status', 'open'),
+  ]);
+
+  return {
+    totalOrganizations: orgsTotal.count || 0,
+    verifiedOrganizations: orgsVerified.count || 0,
+    totalUsers: usersCount.count || 0,
+    totalResources: resourcesCount.count || 0,
+    totalBookings: bookingsCount.count || 0,
+    openIncidents: incidentsCount.count || 0,
+  };
 }

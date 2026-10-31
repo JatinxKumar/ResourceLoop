@@ -17,18 +17,27 @@ import {
 } from 'lucide-react'
 import { StatCard } from '@/components/dashboard/StatCard'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
-import type { Organization, Profile, Incident, AuditLog } from '@/types/domain'
+import type { Organization, Profile, Incident, AuditLog, UserRole } from '@/types/domain'
 import {
-  getAdminPlatformTelemetry,
-  fetchAdminAuditLogs,
-  fetchAdminUsers,
-  updateOrganizationVerification,
-  type PlatformTelemetry,
+  getPlatformOverview,
+  listAllOrganizations,
+  verifyOrganization,
+  listAllUsers,
+  updateUserRole,
 } from '@/services/admin'
-import { fetchIncidents, resolveIncident } from '@/services/incidents'
+import { getAuditLogs } from '@/services/audit'
+import { getIncidents, reviewPenalty, updateIncidentStatus } from '@/services/incidents'
 
 export const AdminDashboardPage: React.FC = () => {
-  const [telemetry, setTelemetry] = useState<PlatformTelemetry | null>(null)
+  const [overview, setOverview] = useState<{
+    totalOrganizations: number
+    verifiedOrganizations: number
+    totalUsers: number
+    totalResources: number
+    totalBookings: number
+    openIncidents: number
+  } | null>(null)
+  const [organizations, setOrganizations] = useState<Organization[]>([])
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([])
   const [incidents, setIncidents] = useState<Incident[]>([])
   const [users, setUsers] = useState<Profile[]>([])
@@ -40,6 +49,10 @@ export const AdminDashboardPage: React.FC = () => {
 
   // Incident resolution modal state
   const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null)
+  const [penaltyAction, setPenaltyAction] = useState<
+    'waived' | 'warning' | 'penalty_applied' | 'restitution_required' | 'privilege_suspended'
+  >('waived')
+  const [penaltyAmount, setPenaltyAmount] = useState<number>(0)
   const [resolutionNotes, setResolutionNotes] = useState('')
   const [resolutionStatus, setResolutionStatus] = useState<'resolved' | 'closed'>('resolved')
 
@@ -47,13 +60,15 @@ export const AdminDashboardPage: React.FC = () => {
     setLoading(true)
     setError(null)
     try {
-      const [tel, logs, incs, userList] = await Promise.all([
-        getAdminPlatformTelemetry(),
-        fetchAdminAuditLogs(30),
-        fetchIncidents().catch(() => [] as Incident[]),
-        fetchAdminUsers().catch(() => [] as Profile[]),
+      const [ov, orgs, logs, incs, userList] = await Promise.all([
+        getPlatformOverview(),
+        listAllOrganizations(),
+        getAuditLogs({ limit: 40 }),
+        getIncidents().catch(() => [] as Incident[]),
+        listAllUsers().catch(() => [] as Profile[]),
       ])
-      setTelemetry(tel)
+      setOverview(ov)
+      setOrganizations(orgs)
       setAuditLogs(logs)
       setIncidents(incs)
       setUsers(userList)
@@ -69,14 +84,28 @@ export const AdminDashboardPage: React.FC = () => {
     loadAllAdminData()
   }, [])
 
-  const handleOrgVerification = async (orgId: string, status: 'verified' | 'rejected' | 'pending') => {
+  const handleOrgVerification = async (orgId: string, status: 'verified' | 'rejected') => {
     setActionLoading(true)
     try {
-      await updateOrganizationVerification(orgId, status)
+      await verifyOrganization(orgId, status)
       setSuccessMsg(`Organization status successfully marked as ${status}.`)
       await loadAllAdminData()
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to update organization status.'
+      setError(msg)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const handleUserRoleChange = async (userId: string, newRole: UserRole) => {
+    setActionLoading(true)
+    try {
+      await updateUserRole(userId, newRole)
+      setSuccessMsg(`User access role updated to ${newRole}.`)
+      await loadAllAdminData()
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to update user access role.'
       setError(msg)
     } finally {
       setActionLoading(false)
@@ -88,16 +117,20 @@ export const AdminDashboardPage: React.FC = () => {
     if (!selectedIncident) return
     setActionLoading(true)
     try {
-      await resolveIncident(selectedIncident.id, {
+      await reviewPenalty({
+        incident_id: selectedIncident.id,
+        action: penaltyAction,
         status: resolutionStatus,
         resolution_notes: resolutionNotes.trim() || 'Reviewed and confirmed by administrator oversight.',
+        penalty_amount: penaltyAmount > 0 ? penaltyAmount : undefined,
       })
-      setSuccessMsg(`Incident #${selectedIncident.id.substring(0, 8)} marked as ${resolutionStatus}.`)
+      setSuccessMsg(`Incident #${selectedIncident.id.substring(0, 8)} penalty review completed with action: ${penaltyAction}.`)
       setSelectedIncident(null)
       setResolutionNotes('')
+      setPenaltyAmount(0)
       await loadAllAdminData()
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to resolve incident.'
+      const msg = err instanceof Error ? err.message : 'Failed to complete penalty review.'
       setError(msg)
     } finally {
       setActionLoading(false)
@@ -163,38 +196,38 @@ export const AdminDashboardPage: React.FC = () => {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">
         <StatCard
           label="Catalog Assets"
-          value={telemetry?.totalResources || 0}
+          value={overview?.totalResources || 0}
           change="Across all labs"
           changeType="positive"
           icon={Server}
         />
         <StatCard
           label="Profiles"
-          value={telemetry?.totalUsers || 0}
+          value={overview?.totalUsers || 0}
           change="Registered seekers/owners"
           changeType="positive"
           icon={Users}
         />
         <StatCard
           label="Reservations"
-          value={telemetry?.totalBookings || 0}
+          value={overview?.totalBookings || 0}
           change="Logged platform-wide"
           changeType="positive"
           icon={Repeat}
         />
         <StatCard
-          label="Reported Incidents"
-          value={telemetry?.totalIncidents || 0}
-          change="Damage & safety flags"
-          changeType={telemetry?.totalIncidents ? 'negative' : 'neutral'}
+          label="Open Incidents"
+          value={overview?.openIncidents || 0}
+          change="Awaiting human review"
+          changeType={overview?.openIncidents ? 'negative' : 'neutral'}
           icon={AlertTriangle}
         />
         <StatCard
-          label="Audit Log Entries"
-          value={telemetry?.totalAuditLogs || 0}
-          change="Immutable compliance records"
-          changeType="neutral"
-          icon={FileText}
+          label="Verified Institutions"
+          value={overview?.verifiedOrganizations || 0}
+          change={`of ${overview?.totalOrganizations || 0} total enrolled`}
+          changeType="positive"
+          icon={TrendingUp}
         />
       </div>
 
@@ -208,7 +241,7 @@ export const AdminDashboardPage: React.FC = () => {
               : 'text-slate-600 hover:bg-slate-100'
           }`}
         >
-          Institutions ({telemetry?.organizations.length || 0})
+          Institutions ({organizations.length})
         </button>
         <button
           onClick={() => setActiveTab('incidents')}
@@ -218,7 +251,7 @@ export const AdminDashboardPage: React.FC = () => {
               : 'text-slate-600 hover:bg-slate-100'
           }`}
         >
-          <span>Incidents</span>
+          <span>Incidents ({incidents.length})</span>
           {incidents.filter((i) => i.status === 'open').length > 0 && (
             <span className="w-2 h-2 rounded-full bg-rose-500 inline-block" />
           )}
@@ -253,7 +286,7 @@ export const AdminDashboardPage: React.FC = () => {
               <h2 className="text-base font-bold text-navy-950">Participating Institutional Entities</h2>
               <p className="text-xs text-slate-500">Live organization registry and verification status in Supabase</p>
             </div>
-            <span className="text-xs text-slate-500">{telemetry?.organizations.length || 0} Organizations Enrolled</span>
+            <span className="text-xs text-slate-500">{organizations.length} Organizations Enrolled</span>
           </div>
 
           <div className="overflow-x-auto">
@@ -268,7 +301,7 @@ export const AdminDashboardPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {telemetry?.organizations.map((org) => (
+                {organizations.map((org) => (
                   <tr key={org.id} className="hover:bg-slate-50/70 transition-colors">
                     <td className="p-3 font-bold text-navy-950 flex items-center gap-2">
                       <Building className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
@@ -305,11 +338,11 @@ export const AdminDashboardPage: React.FC = () => {
                         </button>
                       ) : (
                         <button
-                          onClick={() => handleOrgVerification(org.id, 'pending')}
+                          onClick={() => handleOrgVerification(org.id, 'rejected')}
                           disabled={actionLoading}
                           className="px-2.5 py-1 text-[11px] font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
                         >
-                          Revoke
+                          Reject
                         </button>
                       )}
                     </td>
@@ -523,17 +556,50 @@ export const AdminDashboardPage: React.FC = () => {
             </div>
 
             <form onSubmit={handleResolveIncident} className="space-y-3">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Status Decision</label>
-                <select
-                  value={resolutionStatus}
-                  onChange={(e) => setResolutionStatus(e.target.value as 'resolved' | 'closed')}
-                  className="w-full text-xs p-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
-                >
-                  <option value="resolved">Mark Resolved (Human Reviewed)</option>
-                  <option value="closed">Close Case (No Penalty / Repaired)</option>
-                </select>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Human Penalty Action</label>
+                  <select
+                    value={penaltyAction}
+                    onChange={(e) => setPenaltyAction(e.target.value as any)}
+                    className="w-full text-xs p-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
+                  >
+                    <option value="waived">Waived (No fault found)</option>
+                    <option value="warning">Official Warning Issued</option>
+                    <option value="penalty_applied">Penalty Assessment Applied</option>
+                    <option value="restitution_required">Restitution / Repair Required</option>
+                    <option value="privilege_suspended">Borrowing Suspended</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Case Status</label>
+                  <select
+                    value={resolutionStatus}
+                    onChange={(e) => setResolutionStatus(e.target.value as 'resolved' | 'closed')}
+                    className="w-full text-xs p-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
+                  >
+                    <option value="resolved">Mark Resolved (Human Review)</option>
+                    <option value="closed">Close Case (Archived)</option>
+                  </select>
+                </div>
               </div>
+
+              {(penaltyAction === 'penalty_applied' || penaltyAction === 'restitution_required') && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Financial Assessment / Repair Cost ($ USD)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={penaltyAmount}
+                    onChange={(e) => setPenaltyAmount(Number(e.target.value))}
+                    className="w-full text-xs p-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
+                    placeholder="Enter assessed repair or replacement fee..."
+                  />
+                </div>
+              )}
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
