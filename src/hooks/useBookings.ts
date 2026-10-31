@@ -5,6 +5,7 @@ export type PassTokenType = 'check_in' | 'check_out'
 
 export interface BookingPassResponse {
   token: string
+  raw_token?: string
   token_type: PassTokenType
   expires_at?: string
   booking_id?: string
@@ -75,27 +76,19 @@ export async function fetchOwnerBookings(ownerId: string): Promise<Booking[]> {
 }
 
 /**
- * Submit a real booking request.
+ * Submit a real booking request via backend RPC `request_booking`.
+ * Direct client table inserts on public.bookings are revoked.
  */
 export async function requestBooking(dto: CreateBookingDTO): Promise<Booking> {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) throw new Error('You must be signed in to submit a reservation request.')
 
-  const { data, error } = await supabase
-    .from('bookings')
-    .insert({
-      resource_id: dto.resource_id,
-      requester_id: user.id,
-      start_time: dto.start_time,
-      end_time: dto.end_time,
-      purpose: dto.purpose.trim(),
-      status: 'pending'
-    })
-    .select(`
-      *,
-      resource:resources(title, category, location)
-    `)
-    .single()
+  const { data, error } = await supabase.rpc('request_booking', {
+    p_resource_id: dto.resource_id,
+    p_start_time: dto.start_time,
+    p_end_time: dto.end_time,
+    p_purpose: dto.purpose.trim(),
+  })
 
   if (error) {
     console.error('Booking creation failed:', error.message)
@@ -134,7 +127,7 @@ export async function rejectBooking(
 ): Promise<void> {
   const { error } = await supabase.rpc('reject_booking', {
     p_booking_id: bookingId,
-    p_reason: reason.trim(),
+    p_rejection_reason: reason.trim(),
   })
 
   if (error) {
@@ -178,10 +171,16 @@ export async function generateBookingPass(
     const raw = data as Record<string, unknown>
     const token =
       (typeof raw.token === 'string' && raw.token) ||
+      (typeof raw.raw_token === 'string' && raw.raw_token) ||
       (typeof raw.pass_token === 'string' && raw.pass_token) ||
       (typeof raw.pass === 'string' && raw.pass) ||
       (typeof raw.qr_code === 'string' && raw.qr_code) ||
       JSON.stringify(raw)
+
+    const raw_token =
+      (typeof raw.raw_token === 'string' && raw.raw_token) ||
+      (typeof raw.token === 'string' && raw.token) ||
+      undefined
 
     const expires_at =
       typeof raw.expires_at === 'string'
@@ -197,6 +196,7 @@ export async function generateBookingPass(
 
     return {
       token,
+      raw_token,
       token_type: retTokenType,
       expires_at,
       booking_id: typeof raw.booking_id === 'string' ? raw.booking_id : bookingId,
@@ -210,16 +210,19 @@ export async function generateBookingPass(
 /**
  * Verify a check-in token and transition booking to checked_in via `verify_check_in`.
  * Condition report data is passed atomically with the check-in.
+ * Returns the updated full booking row from the database.
  */
 export async function verifyCheckIn(
   token: string,
   conditionStatus?: ConditionStatus,
-  conditionNotes?: string
-): Promise<VerificationResult> {
+  conditionNotes?: string,
+  imageUrl?: string
+): Promise<Booking> {
   const { data, error } = await supabase.rpc('verify_check_in', {
-    p_token: token,
-    p_condition_status: conditionStatus || null,
-    p_condition_notes: conditionNotes || null,
+    p_raw_token: token.trim(),
+    p_condition_status: conditionStatus || 'good',
+    p_condition_notes: conditionNotes?.trim() || null,
+    p_image_url: imageUrl?.trim() || null,
   })
 
   if (error) {
@@ -227,34 +230,25 @@ export async function verifyCheckIn(
     throw new Error(error.message || 'Check-in verification failed.')
   }
 
-  if (data && typeof data === 'object') {
-    const raw = data as Record<string, unknown>
-    return {
-      booking_id: (raw.booking_id as string) || (raw.id as string) || '',
-      status: (raw.status as string) || 'checked_in',
-      ...raw,
-    }
-  }
-
-  return {
-    booking_id: typeof data === 'string' ? data : '',
-    status: 'checked_in',
-  }
+  return data as Booking
 }
 
 /**
  * Verify a check-out / return token and transition booking to returned via `verify_check_out`.
  * Condition report data is passed atomically with the check-out.
+ * Returns the updated full booking row from the database.
  */
 export async function verifyCheckOut(
   token: string,
   conditionStatus?: ConditionStatus,
-  conditionNotes?: string
-): Promise<VerificationResult> {
+  conditionNotes?: string,
+  imageUrl?: string
+): Promise<Booking> {
   const { data, error } = await supabase.rpc('verify_check_out', {
-    p_token: token,
-    p_condition_status: conditionStatus || null,
-    p_condition_notes: conditionNotes || null,
+    p_raw_token: token.trim(),
+    p_condition_status: conditionStatus || 'good',
+    p_condition_notes: conditionNotes?.trim() || null,
+    p_image_url: imageUrl?.trim() || null,
   })
 
   if (error) {
@@ -262,19 +256,7 @@ export async function verifyCheckOut(
     throw new Error(error.message || 'Check-out verification failed.')
   }
 
-  if (data && typeof data === 'object') {
-    const raw = data as Record<string, unknown>
-    return {
-      booking_id: (raw.booking_id as string) || (raw.id as string) || '',
-      status: (raw.status as string) || 'returned',
-      ...raw,
-    }
-  }
-
-  return {
-    booking_id: typeof data === 'string' ? data : '',
-    status: 'returned',
-  }
+  return data as Booking
 }
 
 /**

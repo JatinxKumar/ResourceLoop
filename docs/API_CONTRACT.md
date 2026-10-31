@@ -80,6 +80,46 @@ import {
 
 ---
 
+### 1.4 Booking & Allocation Service (`src/services/bookings.ts`)
+
+```typescript
+import {
+  requestBooking,
+  approveBooking,
+  rejectBooking,
+  waitlistBooking,
+  cancelBooking,
+  generateBookingPass,
+  verifyCheckIn,
+  verifyCheckOut,
+  markOverdueBookings,
+  getBookingById,
+  fetchUserBookings,
+  fetchOwnerBookings,
+  getBookingTimeline,
+} from '../services/bookings';
+```
+
+#### Function Specifications:
+
+| Function | Parameters | Return Type | Description |
+| :--- | :--- | :--- | :--- |
+| **`requestBooking`** | `dto: CreateBookingDTO` | `Promise<Booking>` | **Exclusive client creation path**. Direct INSERT is revoked. Atomically validates eligibility, organization verification, availability, and usage limits (including overdue), then creates pending reservation. |
+| **`approveBooking`** | `bookingId: string` | `Promise<Booking>` | Approves booking; acquires shared resource lock, enforces precise overdue custody rule (blocks sessions starting within 24h if equipment is overdue), and enforces GiST scheduled overlap constraint. |
+| **`rejectBooking`** | `bookingId: string, rejectionReason: string` | `Promise<Booking>` | Rejects booking with mandatory explanation; recalculates waitlist. |
+| **`waitlistBooking`**| `bookingId: string` | `Promise<Booking>` | Moves request to deterministic FIFO waitlist with unique queue position. |
+| **`cancelBooking`** | `bookingId: string` | `Promise<Booking>` | Cancels reservation prior to check-in (seeker or owner/admin); recalculates waitlist. |
+| **`generateBookingPass`** | `bookingId: string, tokenType: 'check_in' \| 'check_out'` | `Promise<BookingPassResponse>` | STRICT: Restricted to booking's seeker. Generates opaque 256-bit single-use pass for screen display; stores only SHA-256 hash. |
+| **`verifyCheckIn`** | `dto: VerifyHandshakeDTO` | `Promise<Booking>` | Custodian scans pass; atomically logs `before` condition report and marks asset `checked_in`. |
+| **`verifyCheckOut`**| `dto: VerifyHandshakeDTO` | `Promise<Booking>` | Custodian scans return pass; atomically logs `after` condition report and transitions to `returned`. Auto-flags incident if damaged. |
+| **`markOverdueBookings`** | *none* | `Promise<number>` | Maintenance sweep: transitions checked_in bookings past end_time to `overdue` while retaining active custody protection. |
+| **`getBookingById`** | `id: string` | `Promise<Booking \| null>` | Retrieves booking with full joins (resource, org, profiles, condition reports, incidents). |
+| **`fetchUserBookings`**| `userId?: string` | `Promise<Booking[]>` | Retrieves reservations submitted by seeker (defaults to authenticated user). |
+| **`fetchOwnerBookings`**| `ownerId?: string` | `Promise<Booking[]>` | Retrieves all booking requests for assets managed by owner. |
+| **`getBookingTimeline`**| `bookingId: string` | `Promise<{ booking, conditionReports, incidents, auditLogs }>` | Complete audit and condition timeline for compliance and dispute resolution. |
+
+---
+
 ## 2. Usage Examples in React Components
 
 ### 2.1 Fetching Resources with Filters (Catalogue / Discovery)
@@ -195,18 +235,24 @@ ResourceLoop uses Supabase Storage for equipment and laboratory imagery.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending: Seeker Submits Request
-    pending --> approved: Owner / Admin Approves
-    pending --> rejected: Owner / Admin Rejects
-    pending --> cancelled: Seeker Cancels
+    [*] --> pending: Seeker Submits Request (Atomic Eligibility Check)
+    
+    pending --> approved: Owner / Admin Approves (Exclusion Locked)
+    pending --> rejected: Owner / Admin Rejects (Reason Mandatory)
+    pending --> waitlisted: Queued by Owner (Deterministic FIFO Assigned)
+    pending --> cancelled: Seeker Cancels Prior to Start
 
-    approved --> checked_in: Seeker Checks In (Before Condition Report)
-    approved --> cancelled: Seeker Cancels
+    waitlisted --> approved: Owner Promotes & Approves
+    waitlisted --> rejected: Owner Rejects
+    waitlisted --> cancelled: Seeker Withdraws (Queue Recalculated)
+
+    approved --> checked_in: Owner Scans Seeker Token + Before Report
+    approved --> cancelled: Seeker / Owner Cancels Prior to Check-in
     
-    checked_in --> returned: Session Ends (After Condition Report)
-    checked_in --> overdue: Session Time Elapsed & Not Returned
+    checked_in --> returned: Owner Scans Return Token + After Report
+    checked_in --> overdue: now() > end_time without Check-out
     
-    overdue --> returned: Late Return Verified
+    overdue --> returned: Late Return Handshake (+ Incident Flag if Damaged)
 
     rejected --> [*]
     cancelled --> [*]
@@ -214,22 +260,41 @@ stateDiagram-v2
 ```
 
 ### State Definitions:
-1. **`pending`**: Initial state upon submission.
-2. **`approved`**: Reservation confirmed by owner.
-3. **`checked_in`**: Asset actively in use.
-4. **`returned`**: Asset inspected and safely returned.
-5. **`overdue`**: Session time elapsed without check-out.
-6. **`cancelled` / `rejected`**: Terminal closed states.
+1. **`pending`**: Initial state upon submission. Eligibility and usage limits verified atomically.
+2. **`waitlisted`**: Queued request with deterministic FIFO queue position (`waitlist_position`).
+3. **`approved`**: Reservation confirmed by owner. Protected against scheduled overlaps via PostgreSQL `btree_gist` exclusion constraint.
+4. **`checked_in`**: Physical custody transferred. Verified via single-use QR handshake + mandatory pre-inspection report.
+5. **`returned`**: Physical custody restored. Verified via return QR handshake + mandatory post-inspection report.
+6. **`overdue`**: Session time elapsed without check-out. Active custody protection remains active—no new session can start while equipment is unreturned.
+7. **`cancelled` / `rejected`**: Terminal closed states. Invalidate unused access tokens and recalculate waitlist queue.
+
+### Waitlist Queue Semantics & Window Overlaps:
+- **Interval-Aware Grouping**: Waitlists are evaluated dynamically per resource and overlapping time interval (`tstzrange(start_time, end_time, '[)') && tstzrange(cand_start, cand_end, '[)')`).
+- **Cluster Isolation**: Queue positions are completely independent across non-overlapping intervals. Two requests scheduled for distinct days or non-overlapping hours each maintain their own independent position (e.g. both can hold `waitlist_position = 1`).
+- **Partial Overlap Resolution**: Non-identical intervals that intersect (e.g. 10:00 - 14:00 vs 12:00 - 16:00) compete for the shared time slice; FIFO priority is determined strictly by submission order (`created_at ASC, id ASC`).
+- **Transactional Serialization**: Queue additions and compaction are protected against concurrency races via advisory transaction locks (`pg_advisory_xact_lock(hashtext('waitlist:' || resource_id))`).
+- **Compaction**: When an approved booking is cancelled or rejected, `recalculate_waitlist(resource_id)` re-indexes remaining waitlisted bookings in that time-window cluster sequentially (`1, 2, 3...`) using the exact same overlapping-window query.
+- **Manual Promotion Policy**: Promotion from the waitlist is **strictly manual with custodian review**. Automated promotion into `approved` state is prohibited to avoid surprise confirmations and protect lab scheduling integrity. When a slot is vacated, the seeker at `waitlist_position = 1` is queued for review. The asset owner or platform administrator promotes the candidate by executing `approve_booking(booking_id)`, which atomically verifies eligibility, checks for conflicting active custody, transitions the booking to `approved`, and clears `waitlist_position` to `NULL`.
 
 ---
 
-## 5. Security & Access Control Policies
+## 5. QR Access Token Security & Verification Flow
 
-1. **Role Guard**: Normal signups are assigned `seeker`. Users cannot escalate their own role to `owner` or `admin`.
-2. **Resource Ownership**: Owners can only manage resources belonging to their organization. Seekers cannot mutate resource data.
-3. **Audit Trail**: All booking creation and status updates are logged immutably in `audit_logs`.
-4. **RLS Verification**: Never disable RLS in client queries. Authenticated sessions rely on the Supabase JWT.
-5. **Storage Sanitization**: Executable and scriptable formats (SVG, HTML, JS) are rejected at both client and storage policy levels.
+1. **Opaque High-Entropy Tokens**:
+   - The QR code carries ONLY a 256-bit cryptographically random hex token (`crypto.randomBytes(32)`).
+   - Zero metadata (no booking ID, user ID, resource ID, or timestamps) is encoded in the QR string.
+2. **Database Hashing**:
+   - The database stores **exclusively the SHA-256 hash** of the token in `public.booking_access_tokens`.
+   - Ordinary users have zero direct `SELECT` access to `booking_access_tokens`.
+3. **Physical Custodian Handshake**:
+   - **Generation**: Seeker calls `generateBookingPass(bookingId, 'check_in')` when approved to display the QR pass.
+   - **Scanning**: Authenticated Resource Owner / Lab Custodian scans the QR pass using their device camera.
+   - **Verification**: Owner calls `verifyCheckIn({ raw_token, condition_status, condition_notes, image_url })`.
+   - The server computes `sha256(raw_token)` to locate the booking record, verifies owner authorization and active timeframe, sets `used_at = now()`, inserts the `before` condition report, and marks the booking `checked_in`.
+   - **Replay Protection**: Single-use enforcement guarantees any re-scan is rejected.
+4. **Return & Incident Escalation**:
+   - Return follows the same flow with `verifyCheckOut(...)`.
+   - If `condition_status IN ('damaged', 'faulty')`, an open incident is automatically registered in `public.incidents` for administrative and custodian review. Automated penalties are prohibited; human review governs all resolution.
 
 ---
 

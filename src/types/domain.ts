@@ -174,6 +174,7 @@ export interface Booking {
   status: BookingStatus;
   approved_by: string | null;
   rejection_reason: string | null;
+  waitlist_position?: number | null;
   created_at: string;
   updated_at: string;
   // Optional expanded relations
@@ -339,3 +340,35 @@ export interface ResourceEligibilityResult {
     hasOrganizationAffiliation: boolean;
   };
 }
+
+/**
+ * QR Access Pass response carrying opaque high-entropy token
+ */
+export interface BookingPassResponse {
+  booking_id: string;
+  token_type: 'check_in' | 'check_out';
+  token: string;
+  expires_at: string;
+}
+
+/**
+ * Inspection handshake payload for check-in and check-out
+ */
+export interface VerifyHandshakeDTO {
+  raw_token: string;
+  condition_status: ConditionStatus;
+  condition_notes?: string;
+  image_url?: string;
+}
+
+/**
+ * Query criteria for listing bookings
+ */
+export interface BookingFilters {
+  status?: BookingStatus | 'all';
+  resource_id?: string;
+  requester_id?: string;
+  limit?: number;
+  offset?: number;
+}
+

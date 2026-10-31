@@ -156,7 +156,7 @@ export const CheckInOutPage: React.FC = () => {
         conditionStatus || undefined,
         conditionNotes.trim() || undefined
       )
-      setResultBookingId(result.booking_id)
+      setResultBookingId(result.id)
       setStep('confirmed')
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Verification failed.'
