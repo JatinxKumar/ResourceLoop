@@ -424,8 +424,7 @@ BEGIN
 
     SELECT * INTO v_booking
     FROM public.bookings
-    WHERE id = p_booking_id
-    FOR UPDATE;
+    WHERE id = p_booking_id;
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Booking not found: %', p_booking_id USING ERRCODE = 'P0002';
@@ -445,8 +444,14 @@ BEGIN
         USING ERRCODE = '42501';
     END IF;
 
-    -- Shared resource custody lock acquired first
+    -- Strict Lock Hierarchy Step 1: Acquire shared resource-custody advisory lock FIRST
     PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_booking.resource_id::text));
+
+    -- Strict Lock Hierarchy Step 2: Acquire row lock on booking under the custody lock
+    SELECT * INTO v_booking
+    FROM public.bookings
+    WHERE id = p_booking_id
+    FOR UPDATE;
 
     -- Active Custody Protection:
     -- An unreturned checked_in or overdue booking must block new approvals until
@@ -1000,8 +1005,7 @@ BEGIN
 
     SELECT * INTO v_token_record
     FROM public.booking_access_tokens
-    WHERE token_hash = v_token_hash AND token_type = 'check_in'
-    FOR UPDATE;
+    WHERE token_hash = v_token_hash AND token_type = 'check_in';
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Invalid access token: Token does not exist or is unrecognized'
@@ -1020,8 +1024,7 @@ BEGIN
 
     SELECT * INTO v_booking
     FROM public.bookings
-    WHERE id = v_token_record.booking_id
-    FOR UPDATE;
+    WHERE id = v_token_record.booking_id;
 
     IF v_booking.status <> 'approved' THEN
         RAISE EXCEPTION 'State conflict: Booking is in "%" status, must be "approved" to check in', v_booking.status
@@ -1037,8 +1040,19 @@ BEGIN
         USING ERRCODE = '42501';
     END IF;
 
-    -- Shared resource custody lock acquired first
+    -- Strict Lock Hierarchy Step 1: Acquire shared resource-custody advisory lock FIRST
     PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_booking.resource_id::text));
+
+    -- Strict Lock Hierarchy Step 2: Acquire row locks on token and booking under custody lock
+    SELECT * INTO v_token_record
+    FROM public.booking_access_tokens
+    WHERE id = v_token_record.id
+    FOR UPDATE;
+
+    SELECT * INTO v_booking
+    FROM public.bookings
+    WHERE id = v_booking.id
+    FOR UPDATE;
 
     -- Recheck active custody under lock
     SELECT COUNT(*) INTO v_active_custody_count
@@ -1158,8 +1172,7 @@ BEGIN
 
     SELECT * INTO v_token_record
     FROM public.booking_access_tokens
-    WHERE token_hash = v_token_hash AND token_type = 'check_out'
-    FOR UPDATE;
+    WHERE token_hash = v_token_hash AND token_type = 'check_out';
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Invalid access token: Return token does not exist or is unrecognized'
@@ -1178,8 +1191,7 @@ BEGIN
 
     SELECT * INTO v_booking
     FROM public.bookings
-    WHERE id = v_token_record.booking_id
-    FOR UPDATE;
+    WHERE id = v_token_record.booking_id;
 
     IF v_booking.status NOT IN ('checked_in', 'overdue') THEN
         RAISE EXCEPTION 'State conflict: Booking is in "%" status, must be "checked_in" or "overdue" to return', v_booking.status
@@ -1195,7 +1207,19 @@ BEGIN
         USING ERRCODE = '42501';
     END IF;
 
+    -- Strict Lock Hierarchy Step 1: Acquire shared resource-custody advisory lock FIRST
     PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_booking.resource_id::text));
+
+    -- Strict Lock Hierarchy Step 2: Acquire row locks on token and booking under custody lock
+    SELECT * INTO v_token_record
+    FROM public.booking_access_tokens
+    WHERE id = v_token_record.id
+    FOR UPDATE;
+
+    SELECT * INTO v_booking
+    FROM public.bookings
+    WHERE id = v_booking.id
+    FOR UPDATE;
 
     UPDATE public.booking_access_tokens
     SET used_at = now()
@@ -1303,21 +1327,31 @@ SET search_path = pg_catalog, extensions, pg_temp
 AS $$
 DECLARE
     v_updated_count INTEGER := 0;
+    v_resource RECORD;
     v_record RECORD;
 BEGIN
-    FOR v_record IN
-        SELECT b.id, b.resource_id, b.requester_id, r.title AS resource_title, r.owner_id
-        FROM public.bookings b
-        JOIN public.resources r ON r.id = b.resource_id
-        WHERE b.status = 'checked_in'
-          AND b.end_time < now()
-        FOR UPDATE OF b
+    -- Iterate across distinct resources with overdue bookings in deterministic order
+    FOR v_resource IN
+        SELECT DISTINCT resource_id
+        FROM public.bookings
+        WHERE status = 'checked_in'
+          AND end_time < now()
+        ORDER BY resource_id
     LOOP
-        -- Acquire shared resource custody lock
-        PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_record.resource_id::text));
+        -- Strict Lock Hierarchy Step 1: Acquire shared resource-custody advisory lock FIRST
+        PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_resource.resource_id::text));
 
-        -- Recheck that booking is still checked_in under lock
-        IF EXISTS (SELECT 1 FROM public.bookings WHERE id = v_record.id AND status = 'checked_in') THEN
+        -- Strict Lock Hierarchy Step 2: Lock and process overdue bookings for this resource under custody lock
+        FOR v_record IN
+            SELECT b.id, b.resource_id, b.requester_id, r.title AS resource_title, r.owner_id
+            FROM public.bookings b
+            JOIN public.resources r ON r.id = b.resource_id
+            WHERE b.resource_id = v_resource.resource_id
+              AND b.status = 'checked_in'
+              AND b.end_time < now()
+            ORDER BY b.id
+            FOR UPDATE OF b
+        LOOP
             UPDATE public.bookings
             SET status = 'overdue',
                 updated_at = now()
@@ -1354,7 +1388,7 @@ BEGIN
             );
 
             v_updated_count := v_updated_count + 1;
-        END IF;
+        END LOOP;
     END LOOP;
 
     RETURN v_updated_count;

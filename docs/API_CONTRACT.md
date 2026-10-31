@@ -208,16 +208,23 @@ ResourceLoop enforces strict **active physical custody protection**:
   END IF;
   ```
 
-### 3.2 Shared Resource Custody Advisory Locks
-To eliminate race conditions between concurrent handshakes, approvals, and automated background jobs, all custody-altering procedures acquire a shared PostgreSQL transaction-level advisory lock:
-```sql
-PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || resource_id::text));
-```
-This lock is held across the entire transaction in:
-1. **`approve_booking`**: Prevents approving a reservation while an unreturned asset is being checked in or checked out.
-2. **`verify_check_in`**: Guarantees serial execution of check-in handshakes; prevents two concurrent scans from both gaining custody.
-3. **`verify_check_out`**: Serializes return inspection and condition reporting before releasing custody (`status = 'returned'`).
-4. **`mark_overdue_bookings`**: Prevents status transitions while a custodian is actively scanning or returning the asset.
+### 3.2 Strict Lock Hierarchy & Deadlock Prevention
+To eliminate race conditions and deadlock hazards between concurrent handshakes, approvals, and automated background jobs, all custody-altering procedures strictly enforce a **two-step global lock acquisition hierarchy**:
+
+1. **Step 1: Coarse-Grained Advisory Lock (`pg_advisory_xact_lock`)**
+   Every mutation function operating on a resource must FIRST acquire the transaction-level advisory lock on that resource before acquiring any row locks:
+   ```sql
+   PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || resource_id::text));
+   ```
+2. **Step 2: Fine-Grained Row Locks (`FOR UPDATE`)**
+   Row locks on `public.bookings` and `public.booking_access_tokens` are strictly acquired *under* the custody advisory lock.
+3. **Deterministic Multi-Resource Iteration in Batch Sweeps:**
+   In `mark_overdue_bookings()`, the sweep groups overdue records by resource and orders them deterministically (`ORDER BY resource_id`), acquiring the advisory lock for each resource prior to locking its booking rows (`ORDER BY b.id FOR UPDATE OF b`).
+
+#### Deadlock Risk Analysis:
+- **No Inverted Lock Orders:** Because the advisory lock is the coarse-grained gatekeeper and is always acquired before any row lock, no transaction can hold a row lock on a resource's booking while waiting for another transaction's advisory lock.
+- **Single-Resource Serialization:** Concurrent calls to `approve_booking`, `verify_check_in`, `verify_check_out`, and `mark_overdue_bookings` for the same asset serialize at the advisory lock level, mathematically eliminating circular wait conditions.
+- **Cross-Resource Safety:** Multi-resource background sweeps lock distinct resources in ascending `resource_id` order, preventing cross-resource circular wait cycles.
 
 ---
 
@@ -287,18 +294,21 @@ stateDiagram-v2
 
 ---
 
-## 7. Stage 3 Verification Suite & Integration Test Outcomes
+## 7. Stage 3 Verification Suite & Test Status
 
-The test suite in `supabase/tests/booking_engine_verification.sql` validates all 9 backend engine requirements against a clean fixture environment:
+The test suite in `supabase/tests/booking_engine_verification.sql` specifies automated pgTAP / PLpgSQL transaction blocks for all 9 backend engine requirements against isolated fixture scenarios.
+
+> [!IMPORTANT]
+> **Execution Status Disclosure:** In compliance with explicit project policy, Migration 004 has **NOT** been executed against the live Supabase project, and no local disposable PostgreSQL instance is installed on the host environment. Therefore, these tests are **Authored and Validated by Static Code and Schema Logic Analysis**, awaiting live database execution in a staging environment prior to production migration.
 
 | Test ID | Requirement Tested | Expected Invariant | Status |
 | :--- | :--- | :--- | :--- |
-| **TEST 1** | Scheduled Overlap Exclusion | GiST exclusion constraint blocks overlapping approved intervals on the same resource (`SQLSTATE 23P01`). | **PASSED** |
-| **TEST 2** | Active Custody Protection | An unreturned `checked_in` or `overdue` booking strictly blocks new approvals even if scheduled end time has passed (`SQLSTATE P0001`). | **PASSED** |
-| **TEST 3** | Shared Custody Lock & Check-in Recheck | Serializes concurrent check-in requests via `resource_custody` advisory lock; rechecks under lock to prevent double-custody. | **PASSED** |
-| **TEST 4** | Direct Table Mutation Lockdown | Direct client `INSERT`, `UPDATE`, `DELETE` on `public.bookings` is strictly revoked from `anon` and `authenticated`. | **PASSED** |
-| **TEST 5** | Seeker-Only QR Pass Generation | Only the booking's seeker can generate passes; returns `{ booking_id, token_type, token, raw_token, expires_at }`; stores only SHA-256 hash. | **PASSED** |
-| **TEST 6** | Single-Use Replay Attack Prevention | Access tokens record `used_at = now()`. Re-scan attempts are rejected immediately. | **PASSED** |
-| **TEST 7** | Chained Interval FIFO Queue & Compaction | Chained overlapping intervals (A $\leftrightarrow$ B $\leftrightarrow$ C) receive sequential positions 1, 2, 3; independent interval D retains position 1; cancellation triggers seamless compaction. | **PASSED** |
-| **TEST 8** | FIFO Enforcement on Approval | Attempting to approve an overlapping waitlisted candidate out of FIFO order throws `FIFO fairness violation` (`SQLSTATE P0001`). | **PASSED** |
-| **TEST 9** | Return Verification & Incident Escalation | Return handshake releases custody; damaged return automatically opens incident and records immutable audit log. `mark_overdue_bookings` acquires shared custody lock. | **PASSED** |
+| **TEST 1** | Scheduled Overlap Exclusion | GiST exclusion constraint blocks overlapping approved intervals on the same resource (`SQLSTATE 23P01`). | Authored & Logic Verified |
+| **TEST 2** | Active Custody Protection | An unreturned `checked_in` or `overdue` booking strictly blocks new approvals even if scheduled end time has passed (`SQLSTATE P0001`). | Authored & Logic Verified |
+| **TEST 3** | Shared Custody Lock & Check-in Recheck | Serializes concurrent check-in requests via `resource_custody` advisory lock; rechecks under lock to prevent double-custody. | Authored & Logic Verified |
+| **TEST 4** | Direct Table Mutation Lockdown | Direct client `INSERT`, `UPDATE`, `DELETE` on `public.bookings` is strictly revoked from `anon` and `authenticated`. | Authored & Logic Verified |
+| **TEST 5** | Seeker-Only QR Pass Generation | Only the booking's seeker can generate passes; returns `{ booking_id, token_type, token, raw_token, expires_at }`; stores only SHA-256 hash. | Authored & Logic Verified |
+| **TEST 6** | Single-Use Replay Attack Prevention | Access tokens record `used_at = now()`. Re-scan attempts are rejected immediately. | Authored & Logic Verified |
+| **TEST 7** | Chained Interval FIFO Queue & Compaction | Chained overlapping intervals (A $\leftrightarrow$ B $\leftrightarrow$ C) receive sequential positions 1, 2, 3; independent interval D retains position 1; cancellation triggers seamless compaction. | Authored & Logic Verified |
+| **TEST 8** | FIFO Enforcement on Approval | Attempting to approve an overlapping waitlisted candidate out of FIFO order throws `FIFO fairness violation` (`SQLSTATE P0001`). | Authored & Logic Verified |
+| **TEST 9** | Return Verification & Incident Escalation | Return handshake releases custody; damaged return automatically opens incident and records immutable audit log. `mark_overdue_bookings` acquires shared custody lock. | Authored & Logic Verified |
