@@ -31,7 +31,7 @@
 -- 1. EXTENSIONS
 -- ------------------------------------------------------------------------------
 CREATE EXTENSION IF NOT EXISTS btree_gist;
-CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- ------------------------------------------------------------------------------
 -- 2. SCHEMA ADDITIONS: public.bookings
@@ -122,6 +122,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.booking_access_tokens TO service_
 
 -- ------------------------------------------------------------------------------
 -- 4. HELPER: recalculate_waitlist
+-- Re-evaluates queue position per resource and overlapping time window cluster.
+-- Uses exact same FIFO semantics as waitlist_booking():
+-- position = 1 + count of prior overlapping waitlisted requests.
 -- Restricted to internal execution (service_role / postgres only).
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.recalculate_waitlist(p_resource_id UUID)
@@ -133,16 +136,21 @@ AS $$
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtext('waitlist:' || p_resource_id::text));
 
-    WITH ordered AS (
-        SELECT id, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS new_pos
-        FROM public.bookings
-        WHERE resource_id = p_resource_id AND status = 'waitlisted'
-    )
-    UPDATE public.bookings b
-    SET waitlist_position = ordered.new_pos,
-        updated_at = now()
-    FROM ordered
-    WHERE b.id = ordered.id AND b.waitlist_position IS DISTINCT FROM ordered.new_pos;
+    -- For each waitlisted booking b1 of the resource, recompute its deterministic FIFO position
+    -- within its overlapping time window cluster (1 + count of prior overlapping waitlisted bookings).
+    UPDATE public.bookings b1
+    SET waitlist_position = (
+        SELECT COUNT(*) + 1
+        FROM public.bookings b2
+        WHERE b2.resource_id = b1.resource_id
+          AND b2.status = 'waitlisted'
+          AND b2.id <> b1.id
+          AND (b2.created_at < b1.created_at OR (b2.created_at = b1.created_at AND b2.id < b1.id))
+          AND tstzrange(b2.start_time, b2.end_time, '[)') && tstzrange(b1.start_time, b1.end_time, '[)')
+    ),
+    updated_at = now()
+    WHERE b1.resource_id = p_resource_id
+      AND b1.status = 'waitlisted';
 END;
 $$;
 
@@ -539,11 +547,13 @@ BEGIN
 
     PERFORM pg_advisory_xact_lock(hashtext('waitlist:' || v_booking.resource_id::text));
 
-    SELECT COALESCE(MAX(waitlist_position), 0) + 1
+    SELECT COUNT(*) + 1
     INTO v_next_pos
     FROM public.bookings
     WHERE resource_id = v_booking.resource_id 
       AND status = 'waitlisted'
+      AND id <> v_booking.id
+      AND (created_at < v_booking.created_at OR (created_at = v_booking.created_at AND id < v_booking.id))
       AND tstzrange(start_time, end_time, '[)') && tstzrange(v_booking.start_time, v_booking.end_time, '[)');
 
     UPDATE public.bookings
@@ -1136,8 +1146,10 @@ BEGIN
             'booking',
             v_record.id,
             jsonb_build_object(
+                'actor', 'system',
                 'resource_id', v_record.resource_id,
-                'requester_id', v_record.requester_id
+                'requester_id', v_record.requester_id,
+                'marked_at', now()
             )
         );
 

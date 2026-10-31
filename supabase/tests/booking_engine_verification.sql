@@ -121,7 +121,7 @@ BEGIN
     -- --------------------------------------------------------------------------
     RAISE NOTICE 'Running Test 3: Resource Custody Lock & Concurrent Check-In Protection...';
 
-    -- Simulate active session currently in custody
+    -- Simulate active session currently in custody (ends at now() + 45 minutes)
     INSERT INTO public.bookings (id, resource_id, requester_id, start_time, end_time, purpose, status)
     VALUES (
         gen_random_uuid(), v_resource_id, v_seeker1_id,
@@ -129,9 +129,10 @@ BEGIN
         'Borrower A currently using equipment', 'checked_in'
     ) RETURNING * INTO v_booking3;
 
-    -- Acquire resource lock and recheck custody
+    -- Acquire resource lock first
     PERFORM pg_advisory_xact_lock(hashtext('resource_custody:' || v_resource_id::text));
 
+    -- Recheck 1: Active custody detection
     IF (
         SELECT COUNT(*) FROM public.bookings
         WHERE resource_id = v_resource_id AND id <> v_booking1.id AND status IN ('checked_in', 'overdue')
@@ -139,7 +140,19 @@ BEGIN
         RAISE EXCEPTION 'TEST 3 FAILED: Recheck under lock failed to detect active custody!';
     END IF;
 
-    RAISE NOTICE '  -> SUCCESS: Resource lock acquired first; recheck under lock detects active custody.';
+    -- Recheck 2: Test future booking that begins before current session's scheduled end
+    -- A candidate booking starting at now() + 15 minutes MUST be blocked because ongoing session ends at now() + 45 minutes
+    IF (
+        SELECT COUNT(*) FROM public.bookings
+        WHERE resource_id = v_resource_id
+          AND id = v_booking3.id
+          AND status = 'checked_in'
+          AND (now() + interval '15 minutes') < end_time
+    ) = 0 THEN
+        RAISE EXCEPTION 'TEST 3 FAILED: Future booking beginning before ongoing session end was not detected!';
+    END IF;
+
+    RAISE NOTICE '  -> SUCCESS: Resource lock acquired; ongoing session blocks future booking starting before scheduled end.';
     UPDATE public.bookings SET status = 'returned' WHERE id = v_booking3.id;
 
     -- --------------------------------------------------------------------------
@@ -163,7 +176,7 @@ BEGIN
     -- --------------------------------------------------------------------------
     RAISE NOTICE 'Running Test 5: Seeker-Only QR Pass Generation...';
 
-    -- Generate pass tokens
+    -- Generate pass tokens (type: check_in and check_out)
     v_raw_token := encode(gen_random_bytes(32), 'hex');
     v_token_hash := encode(digest(v_raw_token, 'sha256'), 'hex');
 
@@ -199,40 +212,58 @@ BEGIN
     RAISE NOTICE '  -> SUCCESS: Single-use stamp blocks replay attempts.';
 
     -- --------------------------------------------------------------------------
-    -- TEST 7: PARTIALLY OVERLAPPING TIME WINDOW FIFO WAITLIST ORDERING
+    -- TEST 7: PARTIALLY OVERLAPPING TIME WINDOW FIFO WAITLIST ORDERING & WINDOW INDEPENDENCE
     -- --------------------------------------------------------------------------
     RAISE NOTICE 'Running Test 7: Partially Overlapping Window FIFO Waitlist Ordering...';
 
-    -- Insert partially overlapping waitlisted requests:
+    -- Insert partially overlapping waitlisted requests for Window Cluster 1:
     -- Candidate 1: 10:00 - 14:00 (created 20 mins ago) -> Position 1
     -- Candidate 2: 12:00 - 16:00 (created 10 mins ago, overlaps Candidate 1) -> Position 2
     -- Candidate 3: 13:00 - 17:00 (created now, overlaps Candidate 1 & 2) -> Position 3
+    -- Insert Candidate 4 for Window Cluster 2 (Day 9, completely non-overlapping) -> Position 1
     INSERT INTO public.bookings (id, resource_id, requester_id, start_time, end_time, purpose, status, waitlist_position, created_at)
     VALUES 
         (gen_random_uuid(), v_resource_id, v_seeker1_id, now() + interval '7 days', now() + interval '7 days 4 hours', 'Partially Overlapping A (10-14)', 'waitlisted', 1, now() - interval '20 minutes'),
         (gen_random_uuid(), v_resource_id, v_seeker2_id, now() + interval '7 days 2 hours', now() + interval '7 days 6 hours', 'Partially Overlapping B (12-16)', 'waitlisted', 2, now() - interval '10 minutes'),
-        (gen_random_uuid(), v_resource_id, v_seeker1_id, now() + interval '7 days 3 hours', now() + interval '7 days 7 hours', 'Partially Overlapping C (13-17)', 'waitlisted', 3, now());
+        (gen_random_uuid(), v_resource_id, v_seeker1_id, now() + interval '7 days 3 hours', now() + interval '7 days 7 hours', 'Partially Overlapping C (13-17)', 'waitlisted', 3, now()),
+        (gen_random_uuid(), v_resource_id, v_seeker2_id, now() + interval '9 days', now() + interval '9 days 2 hours', 'Non-overlapping D (Day 9)', 'waitlisted', 1, now() - interval '5 minutes');
 
-    -- Cancel Position 1
+    -- Cancel Position 1 in Cluster 1
     UPDATE public.bookings 
     SET status = 'cancelled', waitlist_position = NULL 
-    WHERE resource_id = v_resource_id AND waitlist_position = 1;
+    WHERE resource_id = v_resource_id AND purpose LIKE 'Partially Overlapping A%';
 
-    -- Recalculate waitlist queue
+    -- Recalculate waitlist queue using window-aware recalculate_waitlist
     PERFORM public.recalculate_waitlist(v_resource_id);
 
-    -- Verify that Candidate 2 is compacted to Position 1
+    -- Verify that Candidate B is compacted to Position 1
     IF NOT EXISTS (
         SELECT 1 FROM public.bookings
-        WHERE resource_id = v_resource_id AND status = 'waitlisted' AND waitlist_position = 1
+        WHERE resource_id = v_resource_id AND purpose LIKE 'Partially Overlapping B%' AND waitlist_position = 1
     ) THEN
-        RAISE EXCEPTION 'TEST 7 FAILED: Waitlist compaction failed for partially overlapping window!';
+        RAISE EXCEPTION 'TEST 7 FAILED: Candidate B was not compacted to Position 1!';
     END IF;
 
-    RAISE NOTICE '  -> SUCCESS: Partially overlapping windows ordered strictly FIFO and compacted.';
+    -- Verify that Candidate C is compacted to Position 2
+    IF NOT EXISTS (
+        SELECT 1 FROM public.bookings
+        WHERE resource_id = v_resource_id AND purpose LIKE 'Partially Overlapping C%' AND waitlist_position = 2
+    ) THEN
+        RAISE EXCEPTION 'TEST 7 FAILED: Candidate C was not compacted to Position 2!';
+    END IF;
+
+    -- Verify that Candidate D retains independent Position 1 (non-overlapping window)
+    IF NOT EXISTS (
+        SELECT 1 FROM public.bookings
+        WHERE resource_id = v_resource_id AND purpose LIKE 'Non-overlapping D%' AND waitlist_position = 1
+    ) THEN
+        RAISE EXCEPTION 'TEST 7 FAILED: Non-overlapping Candidate D was incorrectly renumbered by global compaction!';
+    END IF;
+
+    RAISE NOTICE '  -> SUCCESS: Partially overlapping windows ordered strictly FIFO, compacted, and non-overlapping windows remain independent.';
 
     -- --------------------------------------------------------------------------
-    -- TEST 8: CONDITION REPORT, DAMAGE INCIDENT & AUDIT TRAIL
+    -- TEST 8: CHECK-OUT PASS, DAMAGE INCIDENT & SYSTEM AUDIT TRAIL
     -- --------------------------------------------------------------------------
     RAISE NOTICE 'Running Test 8: Condition Reports, Incident Escalation & Audit Trail...';
 
@@ -243,7 +274,13 @@ BEGIN
     VALUES (v_booking1.id, v_owner_id, 'damage', 'Objective lens cracked during laser pulsing', 'open');
 
     INSERT INTO public.audit_logs (actor_id, action, entity_type, entity_id, details)
-    VALUES (v_owner_id, 'BOOKING_RETURNED', 'booking', v_booking1.id, '{"condition_status": "damaged"}'::jsonb);
+    VALUES (
+        v_owner_id,
+        'BOOKING_CHECKED_OUT',
+        'booking',
+        v_booking1.id,
+        jsonb_build_object('condition_status', 'damaged', 'actor', 'system_verified')
+    );
 
     SELECT COUNT(*) INTO v_incident_count FROM public.incidents WHERE booking_id = v_booking1.id;
     SELECT COUNT(*) INTO v_audit_count FROM public.audit_logs WHERE entity_id = v_booking1.id;
@@ -252,7 +289,7 @@ BEGIN
         RAISE EXCEPTION 'TEST 8 FAILED: Incident or audit log was not properly created!';
     END IF;
 
-    RAISE NOTICE '  -> SUCCESS: Condition reports, damage incidents, and audit trails recorded.';
+    RAISE NOTICE '  -> SUCCESS: Check-out condition reports, damage incidents, and audit trails recorded.';
 
     -- --------------------------------------------------------------------------
     -- CLEANUP

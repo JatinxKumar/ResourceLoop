@@ -269,10 +269,12 @@ stateDiagram-v2
 7. **`cancelled` / `rejected`**: Terminal closed states. Invalidate unused access tokens and recalculate waitlist queue.
 
 ### Waitlist Queue Semantics & Window Overlaps:
-- Waitlists are strictly FIFO and evaluated per resource and overlapping time interval (`tstzrange(start_time, end_time, '[)') && tstzrange(cand_start, cand_end, '[)')`).
-- Non-identical intervals that intersect (e.g. 10:00 - 14:00 vs 12:00 - 16:00) compete for the shared time slice; the earlier submission is assigned position #1.
-- Queue mutations are serialized via PostgreSQL advisory transaction locks (`pg_advisory_xact_lock(hashtext('waitlist:' || resource_id))`).
-- When an approved booking is cancelled, `recalculate_waitlist(resource_id)` re-indexes the queue (`1..N`) ordered by `created_at ASC, id ASC`. The owner retains final decision authority and confirms candidate promotions.
+- **Interval-Aware Grouping**: Waitlists are evaluated dynamically per resource and overlapping time interval (`tstzrange(start_time, end_time, '[)') && tstzrange(cand_start, cand_end, '[)')`).
+- **Cluster Isolation**: Queue positions are completely independent across non-overlapping intervals. Two requests scheduled for distinct days or non-overlapping hours each maintain their own independent position (e.g. both can hold `waitlist_position = 1`).
+- **Partial Overlap Resolution**: Non-identical intervals that intersect (e.g. 10:00 - 14:00 vs 12:00 - 16:00) compete for the shared time slice; FIFO priority is determined strictly by submission order (`created_at ASC, id ASC`).
+- **Transactional Serialization**: Queue additions and compaction are protected against concurrency races via advisory transaction locks (`pg_advisory_xact_lock(hashtext('waitlist:' || resource_id))`).
+- **Compaction**: When an approved booking is cancelled or rejected, `recalculate_waitlist(resource_id)` re-indexes remaining waitlisted bookings in that time-window cluster sequentially (`1, 2, 3...`) using the exact same overlapping-window query.
+- **Manual Promotion Policy**: Promotion from the waitlist is **strictly manual with custodian review**. Automated promotion into `approved` state is prohibited to avoid surprise confirmations and protect lab scheduling integrity. When a slot is vacated, the seeker at `waitlist_position = 1` is queued for review. The asset owner or platform administrator promotes the candidate by executing `approve_booking(booking_id)`, which atomically verifies eligibility, checks for conflicting active custody, transitions the booking to `approved`, and clears `waitlist_position` to `NULL`.
 
 ---
 
