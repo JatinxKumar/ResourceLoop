@@ -89,6 +89,9 @@ ON CONFLICT (id) DO NOTHING;
 -- ------------------------------------------------------------------------------
 -- 3. SEED PROFILES
 -- ------------------------------------------------------------------------------
+-- Temporarily disable role guard trigger during bulk seeding
+ALTER TABLE public.profiles DISABLE TRIGGER trg_profiles_role_guard;
+
 INSERT INTO public.profiles (id, full_name, email, role, organization_id, avatar_url, created_at)
 VALUES
 (
@@ -140,6 +143,9 @@ ON CONFLICT (id) DO UPDATE SET
     full_name = EXCLUDED.full_name,
     role = EXCLUDED.role,
     organization_id = EXCLUDED.organization_id;
+
+-- Re-enable role guard trigger
+ALTER TABLE public.profiles ENABLE TRIGGER trg_profiles_role_guard;
 
 -- ------------------------------------------------------------------------------
 -- 4. SEED RESOURCES
