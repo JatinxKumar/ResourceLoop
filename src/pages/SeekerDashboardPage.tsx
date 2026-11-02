@@ -18,6 +18,7 @@ import { StatCard } from '@/components/dashboard/StatCard'
 import { BookingCard } from '@/components/bookings/BookingCard'
 import { ResourceCard } from '@/components/resources/ResourceCard'
 import { QrCheckinModal } from '@/components/resources/QrCheckinModal'
+import { OrganizationRequestModal } from '@/components/organizations/OrganizationRequestModal'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import type { Booking, Resource } from '@/types/domain'
 
@@ -27,6 +28,7 @@ export const SeekerDashboardPage: React.FC = () => {
   const [recommendations, setRecommendations] = useState<Resource[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedBookingForPass, setSelectedBookingForPass] = useState<Booking | null>(null)
+  const [showMembershipModal, setShowMembershipModal] = useState(false)
 
   useEffect(() => {
     if (!user) return
@@ -67,7 +69,17 @@ export const SeekerDashboardPage: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            {profile?.organization?.name || 'Academic Network Member'} • Database Synchronized
+            {profile?.organization?.name
+              ? <>{profile.organization.name} &bull; Database Synchronized</>
+              : <>
+                <button
+                  onClick={() => setShowMembershipModal(true)}
+                  className="text-amber-600 hover:text-amber-700 font-semibold underline"
+                >
+                  No organization — request membership
+                </button>
+              </>
+            }
           </p>
         </div>
 
@@ -234,6 +246,10 @@ export const SeekerDashboardPage: React.FC = () => {
           onClose={() => setSelectedBookingForPass(null)}
           booking={selectedBookingForPass}
         />
+      )}
+
+      {showMembershipModal && (
+        <OrganizationRequestModal onClose={() => setShowMembershipModal(false)} />
       )}
     </div>
   )

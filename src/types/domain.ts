@@ -469,3 +469,28 @@ export interface UserHistory {
   notifications: Notification[];
 }
 
+
+// ==============================================================================
+// 7. ORGANIZATION MEMBERSHIP REQUEST
+// ==============================================================================
+
+/**
+ * Status of a user's request to join an organization.
+ */
+export type MembershipRequestStatus = 'pending' | 'approved' | 'rejected';
+
+/**
+ * A request made by a user to be affiliated with an organization.
+ * Backend table: organization_membership_requests
+ */
+export interface OrganizationMembershipRequest {
+  id: string;
+  user_id: string;
+  organization_id: string;
+  status: MembershipRequestStatus;
+  created_at: string;
+  updated_at: string;
+  // Optional expanded relations (joined from Supabase)
+  user?: Pick<Profile, 'id' | 'full_name' | 'email'>;
+  organization?: Pick<Organization, 'id' | 'name' | 'organization_type'>;
+}
