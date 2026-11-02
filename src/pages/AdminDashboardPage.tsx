@@ -23,6 +23,7 @@ import {
 } from '@/services/admin'
 import { getAuditLogs } from '@/services/audit'
 import { getIncidents, reviewPenalty } from '@/services/incidents'
+import { useAdminMembershipRequests } from '@/hooks/useOrganizationMembership'
 
 export const AdminDashboardPage: React.FC = () => {
   const [overview, setOverview] = useState<{
@@ -37,7 +38,7 @@ export const AdminDashboardPage: React.FC = () => {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([])
   const [incidents, setIncidents] = useState<Incident[]>([])
   const [users, setUsers] = useState<Profile[]>([])
-  const [activeTab, setActiveTab] = useState<'overview' | 'incidents' | 'audit' | 'users'>('overview')
+  const [activeTab, setActiveTab] = useState<'overview' | 'incidents' | 'audit' | 'users' | 'membership'>('overview')
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -51,6 +52,20 @@ export const AdminDashboardPage: React.FC = () => {
   const [penaltyAmount, setPenaltyAmount] = useState<number>(0)
   const [resolutionNotes, setResolutionNotes] = useState('')
   const [resolutionStatus, setResolutionStatus] = useState<'resolved' | 'closed'>('resolved')
+
+  // Membership requests hook
+  const {
+    requests: membershipRequests,
+    loading: membershipLoading,
+    actionLoading: membershipActionLoading,
+    error: membershipError,
+    successMsg: membershipSuccess,
+    setSuccessMsg: setMembershipSuccess,
+    setError: setMembershipError,
+    fetchAllRequests: fetchMembershipRequests,
+    approveRequest: approveMembership,
+    rejectRequest: rejectMembership,
+  } = useAdminMembershipRequests()
 
   const loadAllAdminData = async () => {
     setLoading(true)
@@ -78,7 +93,8 @@ export const AdminDashboardPage: React.FC = () => {
 
   useEffect(() => {
     loadAllAdminData()
-  }, [])
+    fetchMembershipRequests()
+  }, [fetchMembershipRequests])
 
   const handleOrgVerification = async (orgId: string, status: 'verified' | 'rejected') => {
     setActionLoading(true)
@@ -271,6 +287,19 @@ export const AdminDashboardPage: React.FC = () => {
           }`}
         >
           Institutional Members ({users.length})
+        </button>
+        <button
+          onClick={() => { setActiveTab('membership'); fetchMembershipRequests() }}
+          className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 ${
+            activeTab === 'membership'
+              ? 'bg-navy-900 text-white shadow-xs'
+              : 'text-slate-600 hover:bg-slate-100'
+          }`}
+        >
+          <span>Membership Requests ({membershipRequests.filter(r => r.status === 'pending').length})</span>
+          {membershipRequests.some(r => r.status === 'pending') && (
+            <span className="w-2 h-2 rounded-full bg-amber-500 inline-block" />
+          )}
         </button>
       </div>
 
@@ -530,6 +559,115 @@ export const AdminDashboardPage: React.FC = () => {
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+
+      {/* TAB 5: Membership Requests */}
+      {activeTab === 'membership' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <div>
+              <h2 className="text-base font-bold text-navy-950">Organization Membership Requests</h2>
+              <p className="text-xs text-slate-500">Review and approve seeker affiliation requests</p>
+            </div>
+            <span className="text-xs text-slate-500">{membershipRequests.length} Total Requests</span>
+          </div>
+
+          {membershipError && (
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-center justify-between">
+              <p>{membershipError}</p>
+              <button onClick={() => setMembershipError(null)} className="text-rose-600 font-bold">x</button>
+            </div>
+          )}
+
+          {membershipSuccess && (
+            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center justify-between">
+              <p>{membershipSuccess}</p>
+              <button onClick={() => setMembershipSuccess(null)} className="text-emerald-600 font-bold">x</button>
+            </div>
+          )}
+
+          {membershipLoading ? (
+            <div className="py-8 text-center text-xs text-slate-500">Loading requests...</div>
+          ) : membershipRequests.length === 0 ? (
+            <div className="py-12 text-center text-xs text-slate-500 space-y-1">
+              <CheckCircle2 className="w-7 h-7 text-emerald-500 mx-auto mb-2" />
+              <p className="font-semibold text-navy-950">No membership requests</p>
+              <p className="text-slate-400">No seekers have requested organization membership yet.</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200">
+                  <tr>
+                    <th className="p-3">Applicant</th>
+                    <th className="p-3">Email</th>
+                    <th className="p-3">Organization</th>
+                    <th className="p-3">Requested</th>
+                    <th className="p-3">Status</th>
+                    <th className="p-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {membershipRequests.map((req) => (
+                    <tr key={req.id} className="hover:bg-slate-50/70 transition-colors">
+                      <td className="p-3 font-bold text-navy-950">
+                        {req.user?.full_name || req.user_id.substring(0, 8)}
+                      </td>
+                      <td className="p-3 text-slate-600 font-mono text-[11px]">
+                        {req.user?.email || '-'}
+                      </td>
+                      <td className="p-3 text-slate-700">
+                        {req.organization?.name || req.organization_id.substring(0, 8)}
+                        {req.organization?.organization_type && (
+                          <span className="ml-1.5 text-[10px] text-slate-400 capitalize">
+                            ({req.organization.organization_type.replace('_', ' ')})
+                          </span>
+                        )}
+                      </td>
+                      <td className="p-3 font-mono text-[10px] text-slate-400">
+                        {new Date(req.created_at).toLocaleDateString()}
+                      </td>
+                      <td className="p-3">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase ${
+                          req.status === 'approved'
+                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                            : req.status === 'rejected'
+                            ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                            : 'bg-amber-50 text-amber-700 border border-amber-200'
+                        }`}>
+                          {req.status}
+                        </span>
+                      </td>
+                      <td className="p-3 text-right">
+                        {req.status === 'pending' ? (
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              onClick={() => approveMembership(req.id)}
+                              disabled={membershipActionLoading}
+                              className="px-2.5 py-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md hover:bg-emerald-100 transition-colors disabled:opacity-50"
+                            >
+                              Approve
+                            </button>
+                            <button
+                              onClick={() => rejectMembership(req.id)}
+                              disabled={membershipActionLoading}
+                              className="px-2.5 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-md hover:bg-rose-100 transition-colors disabled:opacity-50"
+                            >
+                              Reject
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="text-[11px] text-slate-400 font-medium capitalize">{req.status}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 

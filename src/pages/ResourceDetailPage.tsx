@@ -22,6 +22,7 @@ import { supabase } from '@/lib/supabase'
 import { StatusBadge } from '@/components/common/StatusBadge'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { EmptyState } from '@/components/common/EmptyState'
+import { OrganizationRequestModal } from '@/components/organizations/OrganizationRequestModal'
 import type { Resource } from '@/types/domain'
 
 const DEFAULT_RESOURCE_IMAGE = 'https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=1200&q=80'
@@ -43,6 +44,7 @@ export const ResourceDetailPage: React.FC = () => {
   const [submittingBooking, setSubmittingBooking] = useState(false)
   const [bookingError, setBookingError] = useState<string | null>(null)
   const [bookingSuccess, setBookingSuccess] = useState(false)
+  const [showMembershipModal, setShowMembershipModal] = useState(false)
 
   // Load resource details from Supabase with fallback
   useEffect(() => {
@@ -142,6 +144,10 @@ export const ResourceDetailPage: React.FC = () => {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to create reservation request.'
       setBookingError(msg)
+      const lower = msg.toLowerCase()
+      if (lower.includes('affiliated organization') || lower.includes('affiliation') || (lower.includes('eligibility') && lower.includes('organization'))) {
+        setShowMembershipModal(true)
+      }
     } finally {
       setSubmittingBooking(false)
     }
@@ -316,6 +322,25 @@ export const ResourceDetailPage: React.FC = () => {
                   </div>
                 )}
 
+                {bookingError && (() => {
+                  const lower = bookingError.toLowerCase()
+                  const isOrgErr = lower.includes('affiliated organization') || lower.includes('affiliation') || (lower.includes('eligibility') && lower.includes('organization'))
+                  return isOrgErr ? (
+                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-3">
+                      <Building className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-semibold text-amber-900">Organization affiliation required</p>
+                        <p className="text-xs text-amber-800 mt-0.5">You must belong to a verified institution to reserve resources. Request membership below.</p>
+                        <button type="button" onClick={() => setShowMembershipModal(true)}
+                          className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold transition-colors">
+                          <Building className="w-3.5 h-3.5" />
+                          Request Organization Membership
+                        </button>
+                      </div>
+                    </div>
+                  ) : null
+                })()}
+
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
                     Start Date & Time
@@ -401,6 +426,10 @@ export const ResourceDetailPage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {showMembershipModal && (
+        <OrganizationRequestModal onClose={() => setShowMembershipModal(false)} />
+      )}
     </div>
   )
 }
